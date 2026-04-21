@@ -467,7 +467,7 @@ async function handleTaskMove(detail: TaskMoveDetail): Promise<void> {
   if (kanbanBoardEl) kanbanBoardEl.tasks = [...boardTasks];
 }
 
-async function handleTaskCreate(detail: TaskCreateDetail): Promise<void> {
+async function handleTaskCreate(detail: TaskCreateDetail & { title?: string }): Promise<void> {
   if (!currentUser || !selectedBoardId) return;
   const colTasks = boardTasks.filter((t) => t.column_id === detail.columnId);
   const now = new Date().toISOString();
@@ -476,7 +476,7 @@ async function handleTaskCreate(detail: TaskCreateDetail): Promise<void> {
     type: "task",
     board_id: selectedBoardId,
     column_id: detail.columnId,
-    title: "New Task",
+    title: detail.title?.trim() || "New Task",
     description: "",
     assignee: null,
     due_date: null,

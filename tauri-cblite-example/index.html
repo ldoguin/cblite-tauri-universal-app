@@ -353,14 +353,18 @@
       <!-- ── Tasks View ────────────────────────────────────────── -->
       <div id="tasks-view" class="chat-view" hidden>
         <div class="tasks-toolbar">
-          <select id="board-select">
+          <select id="board-select" title="Select board">
             <option value="">— select a board —</option>
           </select>
-          <button id="btn-new-board" class="btn-secondary" type="button">New Board</button>
-          <span id="board-invite-section" hidden>
-            <input id="invite-username-input" type="text" placeholder="Invite username…" autocomplete="off" />
+          <button id="btn-new-board" class="btn-secondary" type="button" title="Create new board">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true" width="13" height="13"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New board
+          </button>
+          <div id="board-invite-section" class="tasks-invite-row" hidden>
+            <span class="tasks-toolbar-sep"></span>
+            <input id="invite-username-input" type="text" placeholder="Invite by username…" autocomplete="off" />
             <button id="btn-invite-member" class="btn-secondary" type="button">Invite</button>
-          </span>
+          </div>
         </div>
         <cbl-kanban-board id="kanban-board"></cbl-kanban-board>
       </div>
