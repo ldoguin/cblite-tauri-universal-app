@@ -1,0 +1,23 @@
+{
+  "name": "@cblite-uni-app/shared",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./app": "./src/app.ts",
+    "./components": "./src/components/index.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "dependencies": {
+    "@cblite-uni-app/cblite-adapter": "workspace:*",
+    "@tiptap/core": "^3.22.3",
+    "@tiptap/extension-image": "^3.22.3",
+    "@tiptap/extension-link": "^3.22.3",
+    "@tiptap/extension-placeholder": "^3.22.3",
+    "@tiptap/extension-task-item": "^3.22.3",
+    "@tiptap/extension-task-list": "^3.22.3",
+    "@tiptap/extension-youtube": "^3.22.3",
+    "@tiptap/starter-kit": "^3.22.3"
+  }
+}

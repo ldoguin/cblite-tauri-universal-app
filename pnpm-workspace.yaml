@@ -1,0 +1,4 @@
+packages:
+  - "packages/*"
+  - "tauri-cblite-example"
+  - "web-cblite-example"

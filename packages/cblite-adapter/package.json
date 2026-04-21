@@ -1,0 +1,17 @@
+{
+  "name": "@cblite-uni-app/cblite-adapter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./web": "./src/web.ts",
+    "./interface": "./src/interface.ts"
+  },
+  "peerDependencies": {
+    "@couchbase/lite-js": "*"
+  },
+  "peerDependenciesMeta": {
+    "@couchbase/lite-js": { "optional": true }
+  }
+}

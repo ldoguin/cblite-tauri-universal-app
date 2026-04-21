@@ -1,0 +1,2 @@
+[env]
+CBL_ICU_LOCATION = "/usr/lib"

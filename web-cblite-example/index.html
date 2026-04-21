@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notes</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="error-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#cc2a2e;color:#fff;font-size:12px;padding:8px 12px;word-break:break-all;white-space:pre-wrap;max-height:40vh;overflow-y:auto;"></div>
+
+    <!-- Hidden file inputs for browser-native file picking (replaces Tauri dialog plugin) -->
+    <input id="file-picker-image" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" style="display:none" />
+    <input id="file-picker-file"  type="file" accept=".pdf,.mp3,.mp4,.wav,.ogg,.m4a"                           style="display:none" />
+    <input id="file-picker-chat"  type="file" accept="*"                                                       style="display:none" multiple />
+
+    <div class="app">
+
+      <!-- ── Icon Rail ─────────────────────────────────────────── -->
+      <nav class="icon-rail">
+        <!-- Couchbase geometric mark: six diamond shapes in radial pattern -->
+        <div class="rail-brand">
+          <svg viewBox="0 0 32 32" fill="currentColor" aria-label="Couchbase" aria-hidden="true">
+            <g transform="translate(16,16)">
+              <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(0)"/>
+              <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(60)"/>
+              <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(120)"/>
+              <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(180)"/>
+              <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(240)"/>
+              <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(300)"/>
+            </g>
+          </svg>
+        </div>
+
+        <div class="rail-nav">
+          <button class="rail-btn active" id="nav-notes" data-panel="notes" title="Notes">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </button>
+          <button class="rail-btn" id="nav-chat" data-panel="chat" title="AI Chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              <line x1="9" y1="10" x2="15" y2="10"/>
+              <line x1="9" y1="14" x2="13" y2="14"/>
+            </svg>
+          </button>
+          <button class="rail-btn" id="nav-profile" data-panel="profile" title="Profile">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="rail-footer">
+          <span id="status-dot" class="status-dot idle" title="Idle"></span>
+          <button class="rail-btn" id="btn-logout" title="Sign Out">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+          </button>
+        </div>
+      </nav>
+
+      <!-- ── Notes Panel ───────────────────────────────────────── -->
+      <aside class="panel" id="panel-notes">
+        <header class="panel-header">
+          <span class="panel-title">Notes</span>
+          <button id="btn-new-note" class="btn-new" title="New Note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+          </button>
+        </header>
+        <div class="panel-search">
+          <input id="note-search" class="panel-search-input" type="search"
+                 placeholder="Search notes…" autocomplete="off" />
+        </div>
+        <cbl-note-list id="note-list" class="note-list"></cbl-note-list>
+      </aside>
+
+      <!-- ── Chat Panel ───────────────────────────────────────── -->
+      <aside class="panel" id="panel-chat" hidden>
+        <header class="panel-header">
+          <span class="panel-title">AI Chat</span>
+          <button id="btn-new-conv" class="btn-new" title="New Conversation">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+          </button>
+        </header>
+        <div class="panel-search">
+          <input id="conv-search" class="panel-search-input" type="search"
+                 placeholder="Search conversations…" autocomplete="off" />
+        </div>
+        <cbl-conv-list id="conv-list" class="note-list"></cbl-conv-list>
+      </aside>
+
+      <!-- ── Profile Panel ─────────────────────────────────────── -->
+      <aside class="panel panel--profile" id="panel-profile" hidden>
+        <header class="panel-header">
+          <span class="panel-title">Profile</span>
+        </header>
+        <div class="profile-body">
+
+          <!-- User info -->
+          <div class="profile-user">
+            <div class="profile-avatar" id="profile-avatar">?</div>
+            <div class="profile-user-details">
+              <span id="profile-username" class="profile-username">—</span>
+              <span id="profile-enc-badge" class="profile-enc-badge">—</span>
+            </div>
+          </div>
+
+          <!-- Sub-nav + content -->
+          <div class="profile-sections">
+            <nav class="profile-subnav">
+              <button class="profile-subnav-btn active" data-section="sync">Sync</button>
+              <button class="profile-subnav-btn" data-section="ai">AI</button>
+            </nav>
+
+            <!-- Sync section -->
+            <div class="profile-section" id="profile-section-sync">
+              <div class="section-label">Servers</div>
+              <cbl-server-list id="server-list" class="server-list"></cbl-server-list>
+              <div class="server-add-row">
+                <input id="new-server-url" class="form-input" type="url"
+                       placeholder="ws://192.168.x.x:4984/dbname"
+                       list="saved-servers-datalist" />
+                <button id="btn-add-server" class="btn-secondary" type="button">Add</button>
+              </div>
+
+              <div class="form-divider"></div>
+
+              <div class="section-label">Status</div>
+              <div class="profile-sync-status">
+                <span id="status-dot-profile" class="status-dot idle"></span>
+                <span id="status-label" class="sync-status-text">Idle</span>
+              </div>
+              <div class="profile-sync-actions">
+                <button id="btn-sync-now" class="btn-primary">Sync Now</button>
+                <button id="btn-stop-sync" class="btn-danger">Stop</button>
+              </div>
+              <label class="form-toggle">
+                <input type="checkbox" id="sync-continuous">
+                Keep sync running
+              </label>
+            </div>
+
+            <!-- AI section -->
+            <div class="profile-section" id="profile-section-ai" hidden>
+              <div class="section-label">OpenAI</div>
+              <div class="form-group">
+                <label class="form-label" for="openai-base-url-input">Base URL</label>
+                <input id="openai-base-url-input" class="form-input" type="url"
+                       placeholder="https://api.openai.com/v1" autocomplete="off" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="openai-api-key-input">API Key</label>
+                <div class="api-key-row">
+                  <input id="openai-api-key-input" class="form-input" type="password"
+                         placeholder="sk-…" autocomplete="off" />
+                  <button id="btn-toggle-api-key" class="btn-secondary api-key-toggle" type="button" title="Show / hide">
+                    <svg id="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <button id="btn-save-api-key" class="btn-secondary" type="button">Save</button>
+              <p id="api-key-status" class="api-key-status" hidden></p>
+            </div>
+          </div>
+
+        </div>
+      </aside>
+
+      <!-- ── Login Screen ─────────────────────────────────────── -->
+      <div id="screen-login" class="login-screen" hidden>
+        <div class="login-card">
+          <div class="login-brand">
+            <svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+              <g transform="translate(16,16)">
+                <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(0)"/>
+                <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(60)"/>
+                <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(120)"/>
+                <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(180)"/>
+                <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(240)"/>
+                <polygon points="0,-9.5 2.2,-4.2 0,-1.2 -2.2,-4.2" transform="rotate(300)"/>
+              </g>
+            </svg>
+            <span class="login-title">Notes</span>
+          </div>
+          <div class="login-tabs">
+            <button class="login-tab active" id="tab-signin" type="button">Sign In</button>
+            <button class="login-tab" id="tab-create" type="button">Create Account</button>
+          </div>
+
+          <!-- Sign In Form -->
+          <form id="form-signin" class="login-form">
+            <div class="form-group">
+              <label class="form-label" for="signin-username">Username</label>
+              <input id="signin-username" class="form-input" type="text" autocomplete="username" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="signin-password">Password</label>
+              <input id="signin-password" class="form-input" type="password" autocomplete="current-password" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="signin-server">
+                Server URL <span class="form-hint">(optional)</span>
+              </label>
+              <input id="signin-server" class="form-input" type="url" placeholder="http://192.168.x.x:3000"
+                     list="saved-servers-datalist" />
+            </div>
+            <p id="signin-error" class="login-error" hidden></p>
+            <button type="submit" class="btn-primary btn-block">Sign In</button>
+          </form>
+
+          <!-- Create Account Form -->
+          <form id="form-create" class="login-form" hidden>
+            <div class="form-group">
+              <label class="form-label" for="create-username">Username</label>
+              <input id="create-username" class="form-input" type="text" autocomplete="username" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="create-password">Password</label>
+              <input id="create-password" class="form-input" type="password" autocomplete="new-password" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="create-enc-mode">Encryption</label>
+              <select id="create-enc-mode" class="form-input">
+                <option value="none">None</option>
+                <option value="app-level" selected>App-level (AES-GCM)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="create-server">
+                Server URL <span class="form-hint">(optional)</span>
+              </label>
+              <input id="create-server" class="form-input" type="url" placeholder="http://192.168.x.x:3000"
+                     list="saved-servers-datalist" />
+            </div>
+            <p id="create-error" class="login-error" hidden></p>
+            <button type="submit" class="btn-primary btn-block">Create Account</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- ── Editor ────────────────────────────────────────────── -->
+      <main class="editor">
+        <div id="editor-empty" class="editor-empty">
+          <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="editor-empty-icon">
+            <rect x="10" y="8" width="44" height="52" rx="4"/>
+            <line x1="20" y1="24" x2="44" y2="24"/>
+            <line x1="20" y1="33" x2="44" y2="33"/>
+            <line x1="20" y1="42" x2="34" y2="42"/>
+          </svg>
+          <p>Select a note or create a new one</p>
+        </div>
+        <div id="editor-content" class="editor-content" hidden>
+          <button id="btn-back-mobile" class="btn-back-mobile">← Back</button>
+          <input id="note-title" class="note-title-input" type="text" placeholder="Title" />
+          <div id="editor-toolbar" class="editor-toolbar" role="toolbar" aria-label="Formatting">
+            <button class="tb-btn" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+            <button class="tb-btn" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+            <button class="tb-btn" data-cmd="strike" title="Strikethrough"><s>S</s></button>
+            <span class="tb-sep"></span>
+            <button class="tb-btn" data-cmd="h1" title="Heading 1">H1</button>
+            <button class="tb-btn" data-cmd="h2" title="Heading 2">H2</button>
+            <button class="tb-btn" data-cmd="h3" title="Heading 3">H3</button>
+            <span class="tb-sep"></span>
+            <button class="tb-btn" data-cmd="bulletList" title="Bullet list">• List</button>
+            <button class="tb-btn" data-cmd="orderedList" title="Numbered list">1. List</button>
+            <button class="tb-btn" data-cmd="taskList" title="Task list">☑ Todo</button>
+            <span class="tb-sep"></span>
+            <button class="tb-btn" data-cmd="codeBlock" title="Code block">&lt;/&gt;</button>
+            <button class="tb-btn" data-cmd="blockquote" title="Blockquote">❝</button>
+            <span class="tb-sep"></span>
+            <button class="tb-btn" data-cmd="insertDate" title="Insert current date">📅</button>
+            <button class="tb-btn" data-cmd="attachImage" title="Attach image">🖼</button>
+            <button class="tb-btn" data-cmd="attachFile" title="Attach file (PDF/audio)">📎</button>
+            <button class="tb-btn" data-cmd="embedYoutube" title="Embed YouTube">▶</button>
+          </div>
+          <div id="rich-editor" class="rich-editor-mount"></div>
+          <div class="editor-actions">
+            <button id="btn-save" class="btn-primary">Save</button>
+            <button id="btn-delete" class="btn-danger">Delete</button>
+          </div>
+        </div>
+      </main>
+
+      <!-- ── Chat View ─────────────────────────────────────────── -->
+      <section id="chat-view" class="chat-view" hidden>
+        <div id="chat-empty" class="editor-empty">
+          <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="editor-empty-icon">
+            <path d="M54 38a6 6 0 0 1-6 6H18l-10 10V12a6 6 0 0 1 6-6h34a6 6 0 0 1 6 6z"/>
+            <line x1="22" y1="26" x2="42" y2="26"/>
+            <line x1="22" y1="34" x2="36" y2="34"/>
+          </svg>
+          <p>Select a conversation or start a new one</p>
+        </div>
+        <div id="chat-content" class="chat-content" hidden>
+          <button id="btn-back-chat-mobile" class="btn-back-mobile">← Back</button>
+          <header class="chat-header">
+            <input id="conv-title" class="note-title-input" type="text" placeholder="Conversation title" />
+          </header>
+          <cbl-chat-messages id="chat-messages" class="chat-messages"></cbl-chat-messages>
+          <cbl-pending-attachments id="chat-pending-attachments" class="chat-pending-attachments"></cbl-pending-attachments>
+          <div class="chat-input-row">
+            <button id="btn-delete-conv" class="chat-icon-btn chat-icon-btn--danger" title="Delete conversation">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                <path d="M10 11v6"/><path d="M14 11v6"/>
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+              </svg>
+            </button>
+            <button id="btn-attach-chat" class="chat-icon-btn" title="Attach file">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <textarea id="chat-input" class="chat-input" placeholder="Message…" rows="1"></textarea>
+            <button id="btn-send" class="btn-primary chat-send-btn" title="Send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </section>
+
+    <!-- Datalist of saved servers — populated by JS -->
+    <datalist id="saved-servers-datalist"></datalist>
+    </div>
+  </body>
+</html>

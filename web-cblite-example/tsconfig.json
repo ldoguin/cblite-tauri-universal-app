@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@cblite": ["../packages/cblite-adapter/src/web.ts"],
+      "@cblite-uni-app/cblite-adapter": ["../packages/cblite-adapter/src/index.ts"],
+      "@cblite-uni-app/shared": ["../packages/shared/src/index.ts"],
+      "@cblite-uni-app/shared/components": ["../packages/shared/src/components/index.ts"]
+    }
+  },
+  "include": ["src"]
+}
