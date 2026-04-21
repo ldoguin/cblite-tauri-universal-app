@@ -2,7 +2,8 @@ import { appLocalDataDir } from "@tauri-apps/api/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   openDatabase, closeDatabase, executeQuery, getDocument, saveDocument,
-  startReplication, stopReplication, onCollectionChanged, onReplicationStatus,
+  startReplication as _startReplication, stopReplication,
+  onCollectionChanged, onReplicationStatus,
   saveBlob, getBlobData, registerPredictiveModel, unregisterPredictiveModel,
 } from "@cblite";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -17,6 +18,23 @@ import {
 import type { UserProfile, EncryptionMode } from "@cblite-uni-app/shared";
 
 // ── DB adapter ────────────────────────────────────────────────────────────────
+
+/**
+ * Wraps the plugin's startReplication to always replicate notes, conversations,
+ * and tasks in a single replicator via the patched `extraCollections` parameter.
+ */
+function startReplication(
+  url: string,
+  collection: string,
+  direction: "push" | "pull" | "both",
+  auth?: { username: string; password: string } | { sessionId: string; cookieName?: string },
+  fieldEncryption?: { password: string; salt: string }
+): Promise<void> {
+  const primary = collection.includes(".") ? collection : `_default.${collection}`;
+  const extras = ["_default.notes", "_default.conversations", "_default.tasks"]
+    .filter((c) => c !== primary);
+  return _startReplication(url, primary, direction, auth, fieldEncryption, extras);
+}
 
 const adapter: DatabaseAdapter = {
   openDatabase, closeDatabase, getDocument, saveDocument, executeQuery,
