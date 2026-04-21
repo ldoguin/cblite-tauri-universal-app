@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         db::ensure_bucket(&cb.cluster, notes_bucket, 256).await;
         db::ensure_collection(&cb.cluster, notes_bucket, "_default", "notes").await;
         db::ensure_collection(&cb.cluster, notes_bucket, "_default", "conversations").await;
+        db::ensure_collection(&cb.cluster, notes_bucket, "_default", "tasks").await;
 
         ensure_sg_database(&http, admin_url, db_name, sg_bucket.as_deref(), sg_admin_auth.as_deref(), &cors_origins).await;
     }
@@ -118,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(routes::sync::login))
         .route("/sync/config", get(routes::sync::get_sync_config))
         .route("/ai/chat", post(ai::chat))
+        .route("/boards/:board_id/members", post(routes::boards::add_member))
         .layer(cors)
         .with_state(state);
 
@@ -158,8 +160,18 @@ async fn ensure_sg_database(
 
     let bucket_name = bucket.unwrap_or(db_name);
     // Named collections require per-collection sync functions in SG 3.x.
-    // Each document is routed to "user.<owner>" so users only see their own docs.
-    let sync_fn = "function(doc,oldDoc){var o=doc.owner||(oldDoc&&oldDoc.owner);if(!o)throw({forbidden:'missing owner'});requireUser(o);channel('user.'+o);}";
+    // notes/conversations: routed to "user.<owner>" so users only see their own docs.
+    let user_sync_fn = "function(doc,oldDoc){var o=doc.owner||(oldDoc&&oldDoc.owner);if(!o)throw({forbidden:'missing owner'});requireUser(o);channel('user.'+o);}";
+    // tasks: routed to "board.<boardId>"; board docs also fan out to each member's personal channel.
+    let tasks_sync_fn = "function(doc,oldDoc){\
+        var bid=doc.board_id||(oldDoc&&oldDoc.board_id);\
+        if(!bid)throw({forbidden:'missing board_id'});\
+        channel('board.'+bid);\
+        if(doc.type==='board'){\
+            var members=doc.members||[];\
+            for(var i=0;i<members.length;i++){channel('user.'+members[i]);}\
+        }\
+    }";
 
     // SG docs: wildcards don't work for authenticated connections; use explicit origins.
     // Both "origin" and "login_origin" are required for browser BLIP over WebSocket.
@@ -172,9 +184,10 @@ async fn ensure_sg_database(
     let scopes_config = serde_json::json!({
         "_default": {
             "collections": {
-                "_default":      { "sync": sync_fn },
-                "notes":         { "sync": sync_fn },
-                "conversations": { "sync": sync_fn }
+                "_default":      { "sync": user_sync_fn },
+                "notes":         { "sync": user_sync_fn },
+                "conversations": { "sync": user_sync_fn },
+                "tasks":         { "sync": tasks_sync_fn }
             }
         }
     });
@@ -210,12 +223,18 @@ async fn ensure_sg_database(
 
         // Sync functions: SG 3.x forbids changing scopes via PUT /{db}/_config
         // after creation. Use per-collection endpoints instead.
-        for coll in &["_default", "notes", "conversations"] {
+        let coll_sync_pairs: &[(&str, &str)] = &[
+            ("_default",      user_sync_fn),
+            ("notes",         user_sync_fn),
+            ("conversations", user_sync_fn),
+            ("tasks",         tasks_sync_fn),
+        ];
+        for (coll, sfn) in coll_sync_pairs {
             let coll_url = format!(
                 "{}/{}/_config/scopes/_default/collections/{}",
                 admin_url, db_name, coll
             );
-            let body = serde_json::json!({ "sync": sync_fn });
+            let body = serde_json::json!({ "sync": sfn });
             let mut req = http.put(&coll_url).json(&body);
             if let Some(auth) = admin_auth {
                 req = req.header("Authorization", format!("Basic {}", base64_encode(auth)));

@@ -63,3 +63,42 @@ export interface AuthSession {
 export interface SavedServer {
   url: string;
 }
+
+// ── Kanban / Tasks ────────────────────────────────────────────────────────────
+
+export interface Board {
+  id: string;
+  type: "board";
+  name: string;
+  owner: string;
+  members: string[];
+  column_order: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Column {
+  id: string;
+  type: "column";
+  board_id: string;
+  name: string;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Task {
+  id: string;
+  type: "task";
+  board_id: string;
+  column_id: string;
+  title: string;
+  description: string;
+  assignee: string | null;
+  due_date: string | null;
+  labels: string[];
+  position: number;
+  owner: string;
+  created_at: string;
+  updated_at: string;
+}

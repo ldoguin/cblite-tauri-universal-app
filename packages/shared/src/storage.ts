@@ -1,7 +1,7 @@
 // ── DB helpers (adapter-agnostic) ─────────────────────────────────────────────
 
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
-import type { Note, Conversation, SyncConfig, UserProfile, SavedServer } from "./types.js";
+import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task } from "./types.js";
 import { unwrapEncryptable, encryptNoteFields, decryptNoteFields } from "./note-encryption.js";
 
 // ── Config / profile ──────────────────────────────────────────────────────────
@@ -209,4 +209,158 @@ export async function deleteConversationDoc(
   username: string
 ): Promise<void> {
   await adapter.saveDocument("conversations", id, { deleted: true, owner: username });
+}
+
+// ── Boards ────────────────────────────────────────────────────────────────────
+
+export async function loadBoards(
+  adapter: DatabaseAdapter,
+  username: string
+): Promise<Board[]> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, name, owner, members, column_order, created_at, updated_at" +
+        " FROM tasks" +
+        " WHERE type = 'board'" +
+        " AND (deleted IS MISSING OR deleted = false)" +
+        " ORDER BY created_at ASC",
+      {}
+    )) as Array<Board & { members: unknown }>;
+    return rows
+      .filter((r) => r && r.id)
+      .filter((r) => r.owner === username || (Array.isArray(r.members) && r.members.includes(username)))
+      .map((r) => ({ ...r, members: Array.isArray(r.members) ? r.members : [], column_order: Array.isArray(r.column_order) ? r.column_order : [] }));
+  } catch {
+    return [];
+  }
+}
+
+export async function saveBoardDoc(
+  adapter: DatabaseAdapter,
+  board: Board
+): Promise<Board> {
+  const updated = { ...board, updated_at: new Date().toISOString() };
+  await adapter.saveDocument("tasks", board.id, {
+    type: "board",
+    name: updated.name,
+    owner: updated.owner,
+    members: updated.members,
+    column_order: updated.column_order,
+    created_at: updated.created_at,
+    updated_at: updated.updated_at,
+    board_id: board.id, // required by SG sync function
+  });
+  return updated;
+}
+
+export async function deleteBoardDoc(
+  adapter: DatabaseAdapter,
+  id: string,
+  username: string
+): Promise<void> {
+  await adapter.saveDocument("tasks", id, { deleted: true, owner: username, board_id: id });
+}
+
+// ── Columns ───────────────────────────────────────────────────────────────────
+
+export async function loadColumns(
+  adapter: DatabaseAdapter,
+  boardId: string
+): Promise<Column[]> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, board_id, name, position, created_at, updated_at" +
+        " FROM tasks" +
+        " WHERE type = 'column'" +
+        " AND board_id = $boardId" +
+        " AND (deleted IS MISSING OR deleted = false)" +
+        " ORDER BY position ASC",
+      { boardId }
+    )) as Column[];
+    return rows.filter((r) => r && r.id);
+  } catch {
+    return [];
+  }
+}
+
+export async function saveColumnDoc(
+  adapter: DatabaseAdapter,
+  col: Column
+): Promise<Column> {
+  const updated = { ...col, updated_at: new Date().toISOString() };
+  await adapter.saveDocument("tasks", col.id, {
+    type: "column",
+    board_id: updated.board_id,
+    name: updated.name,
+    position: updated.position,
+    created_at: updated.created_at,
+    updated_at: updated.updated_at,
+  });
+  return updated;
+}
+
+export async function deleteColumnDoc(
+  adapter: DatabaseAdapter,
+  id: string,
+  boardId: string
+): Promise<void> {
+  await adapter.saveDocument("tasks", id, { deleted: true, board_id: boardId });
+}
+
+// ── Tasks ─────────────────────────────────────────────────────────────────────
+
+export async function loadTasks(
+  adapter: DatabaseAdapter,
+  boardId: string
+): Promise<Task[]> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, board_id, column_id, title, description," +
+        " assignee, due_date, labels, position, owner, created_at, updated_at" +
+        " FROM tasks" +
+        " WHERE type = 'task'" +
+        " AND board_id = $boardId" +
+        " AND (deleted IS MISSING OR deleted = false)" +
+        " ORDER BY position ASC",
+      { boardId }
+    )) as Array<Task & { labels: unknown }>;
+    return rows
+      .filter((r) => r && r.id)
+      .map((r) => ({ ...r, labels: Array.isArray(r.labels) ? r.labels : [] }));
+  } catch {
+    return [];
+  }
+}
+
+export async function saveTaskDoc(
+  adapter: DatabaseAdapter,
+  task: Task
+): Promise<Task> {
+  const updated = { ...task, updated_at: new Date().toISOString() };
+  await adapter.saveDocument("tasks", task.id, {
+    type: "task",
+    board_id: updated.board_id,
+    column_id: updated.column_id,
+    title: updated.title,
+    description: updated.description,
+    assignee: updated.assignee,
+    due_date: updated.due_date,
+    labels: updated.labels,
+    position: updated.position,
+    owner: updated.owner,
+    created_at: updated.created_at,
+    updated_at: updated.updated_at,
+  });
+  return updated;
+}
+
+export async function deleteTaskDoc(
+  adapter: DatabaseAdapter,
+  id: string,
+  boardId: string
+): Promise<void> {
+  await adapter.saveDocument("tasks", id, { deleted: true, board_id: boardId });
 }

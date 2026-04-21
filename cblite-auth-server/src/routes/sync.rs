@@ -9,6 +9,7 @@ use crate::{
     auth::{create_jwt, validate_jwt, verify_password},
     error::AppError,
     models::{User, UserSyncConfig},
+    routes::boards::grant_board_channel,
     AppState,
 };
 
@@ -91,6 +92,9 @@ async fn create_sg_session(
     // Ensure the SG user exists (idempotent PUT); handles DB resets without requiring re-registration.
     ensure_sg_user(state, sg_url, sg_db, username, password).await;
 
+    // Re-grant board channels the user is a member of (handles SG resets).
+    regrant_board_channels(state, username).await;
+
     let body = serde_json::json!({ "name": username });
     let mut req = state.http
         .post(format!("{}/{}/_session", sg_url, sg_db))
@@ -131,6 +135,7 @@ async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &
             "_default": {
                 "notes":         { "admin_channels": [&user_channel] },
                 "conversations": { "admin_channels": [&user_channel] },
+                "tasks":         { "admin_channels": [&user_channel] },
             }
         }
     });
@@ -144,6 +149,40 @@ async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &
         Ok(r) if r.status().is_success() || r.status().as_u16() == 200 || r.status().as_u16() == 201 => {}
         Ok(r) => eprintln!("SG user upsert returned {} for '{username}'", r.status()),
         Err(e) => eprintln!("SG user upsert failed for '{username}': {e}"),
+    }
+}
+
+/// Query Couchbase Server for all boards where the user is a member and
+/// re-grant the corresponding `board.<id>` channels on Sync Gateway.
+/// Called at login to recover from SG database resets.
+async fn regrant_board_channels(state: &AppState, username: &str) {
+    if state.sg_admin_url.is_none() || state.sg_db.is_none() {
+        return;
+    }
+
+    // The notes bucket (same as sg_db name) stores board documents.
+    let sg_bucket = state.sg_db.as_deref().unwrap_or("notes");
+    let statement = format!(
+        "SELECT META().id AS id FROM `{sg_bucket}`.`_default`.`tasks` \
+         WHERE type = 'board' AND (owner = $username OR ANY m IN members SATISFIES m = $username END)"
+    );
+
+    let rows: Vec<serde_json::Value> = match state
+        .cb
+        .sqlpp(&statement, serde_json::json!({ "$username": username }))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[regrant_board_channels] query failed (non-fatal): {e}");
+            return;
+        }
+    };
+
+    for row in rows {
+        if let Some(board_id) = row["id"].as_str() {
+            grant_board_channel(state, username, board_id).await;
+        }
     }
 }
 
