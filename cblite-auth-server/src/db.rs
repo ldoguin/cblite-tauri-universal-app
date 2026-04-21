@@ -124,6 +124,58 @@ pub async fn ensure_bucket(cluster: &Cluster, bucket_name: &str, ram_mb: u32) {
     }
 }
 
+/// Ensure required N1QL indexes exist, creating them if missing.
+///
+/// Called once at startup. Uses `CREATE INDEX IF NOT EXISTS` so it is safe to
+/// run on every boot. Indexes are created in the background (`WITH {"defer_build": false}`
+/// is the default) so the server does not block waiting for them to build.
+pub async fn ensure_indexes(cluster: &Cluster, auth_bucket: &str, notes_bucket: &str) {
+    // Primary index on the auth bucket — needed for the user search query
+    // (`SELECT username FROM auth WHERE META().id LIKE 'user::%'`).
+    let stmts: &[(&str, &str)] = &[
+        // Auth bucket: primary index so ad-hoc queries work during development,
+        // plus a covering index on username for the search endpoint.
+        (
+            "auth_primary",
+            &format!(
+                "CREATE PRIMARY INDEX IF NOT EXISTS `auth_primary` ON `{auth_bucket}` WITH {{\"num_replica\": 0}}"
+            ),
+        ),
+        (
+            "auth_username",
+            &format!(
+                "CREATE INDEX IF NOT EXISTS `auth_username` ON `{auth_bucket}`(username) WHERE META().id LIKE 'user::%' WITH {{\"num_replica\": 0}}"
+            ),
+        ),
+        // Notes bucket / tasks collection: index on board_id + type for board queries.
+        (
+            "tasks_board_type",
+            &format!(
+                "CREATE INDEX IF NOT EXISTS `tasks_board_type` \
+                 ON `{notes_bucket}`.`_default`.`tasks`(board_id, type) \
+                 WITH {{\"num_replica\": 0}}"
+            ),
+        ),
+        // Notes bucket / tasks collection: index on members array for board membership queries.
+        (
+            "tasks_members",
+            &format!(
+                "CREATE INDEX IF NOT EXISTS `tasks_members` \
+                 ON `{notes_bucket}`.`_default`.`tasks`(DISTINCT ARRAY m FOR m IN members END, owner, type) \
+                 WITH {{\"num_replica\": 0}}"
+            ),
+        ),
+    ];
+
+    for (name, stmt) in stmts {
+        let options = couchbase::options::query_options::QueryOptions::default();
+        match cluster.query(stmt, options).await {
+            Ok(_) => println!("Index '{name}' ensured."),
+            Err(e) => eprintln!("Index '{name}' creation failed (non-fatal): {e}"),
+        }
+    }
+}
+
 /// Ensure a named collection exists within a bucket's scope, creating it if necessary.
 pub async fn ensure_collection(
     cluster: &Cluster,

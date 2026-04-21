@@ -53,6 +53,9 @@ export class CblKanbanBoard extends HTMLElement {
   private _tasks: Task[] = [];
   private _currentUser = "";
 
+  /** Optional callback for user search — set by app.ts after mount. */
+  userSearch: ((query: string) => Promise<string[]>) | null = null;
+
   // drag state
   private _dragTaskId: string | null = null;
   private _dragFromColId: string | null = null;
@@ -411,6 +414,68 @@ export class CblKanbanBoard extends HTMLElement {
     colEl.appendChild(confirm);
   }
 
+  // ── User autocomplete (assignee field in modal) ───────────────────────────
+
+  private _attachUserAutocomplete(input: HTMLInputElement): void {
+    if (!this.userSearch) return;
+    const search = this.userSearch;
+
+    const dropdown = document.createElement("div");
+    dropdown.className = "invite-autocomplete kanban-assignee-ac";
+    dropdown.hidden = true;
+    // Insert right after the input inside its parent
+    input.insertAdjacentElement("afterend", dropdown);
+
+    let timer = 0;
+    let activeIndex = -1;
+    let results: string[] = [];
+
+    const close = () => { dropdown.hidden = true; activeIndex = -1; results = []; };
+    const pick  = (u: string) => { input.value = u; close(); input.focus(); };
+
+    const highlight = (i: number) => {
+      dropdown.querySelectorAll<HTMLElement>(".invite-autocomplete-item")
+        .forEach((el, idx) => el.classList.toggle("active", idx === i));
+    };
+
+    const render = (usernames: string[]) => {
+      results = usernames;
+      activeIndex = -1;
+      dropdown.innerHTML = "";
+      if (!usernames.length) { close(); return; }
+      for (const u of usernames) {
+        const item = document.createElement("div");
+        item.className = "invite-autocomplete-item";
+        const av = document.createElement("span");
+        av.className = "invite-autocomplete-avatar";
+        av.textContent = u.slice(0, 2).toUpperCase();
+        const nm = document.createElement("span");
+        nm.textContent = u;
+        item.append(av, nm);
+        item.addEventListener("mousedown", (e) => { e.preventDefault(); pick(u); });
+        dropdown.appendChild(item);
+      }
+      dropdown.hidden = false;
+    };
+
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (!q) { close(); return; }
+      timer = window.setTimeout(() => search(q).then(render), 200);
+    });
+
+    input.addEventListener("keydown", (e) => {
+      if (dropdown.hidden) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); activeIndex = Math.min(activeIndex + 1, results.length - 1); highlight(activeIndex); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); activeIndex = Math.max(activeIndex - 1, -1); highlight(activeIndex); }
+      else if (e.key === "Enter" && activeIndex >= 0) { e.preventDefault(); pick(results[activeIndex]); }
+      else if (e.key === "Escape") close();
+    });
+
+    input.addEventListener("blur", () => setTimeout(close, 150));
+  }
+
   private _openCardModal(task: Task): void {
     document.getElementById("kanban-card-modal")?.remove();
 
@@ -478,6 +543,7 @@ export class CblKanbanBoard extends HTMLElement {
     assigneeInput.type = "text";
     assigneeInput.placeholder = "username";
     assigneeInput.value = task.assignee ?? "";
+    assigneeInput.setAttribute("autocomplete", "off");
 
     const dueInput = document.createElement("input");
     dueInput.className = "kanban-modal-input";
@@ -507,12 +573,15 @@ export class CblKanbanBoard extends HTMLElement {
     refreshPreview();
     labelsInput.addEventListener("input", refreshPreview);
 
+    const assigneeField = mkField("Assignee", assigneeInput);
     rightCol.append(
-      mkField("Assignee", assigneeInput),
+      assigneeField,
       mkField("Due date", dueInput),
       mkField("Labels", labelsInput),
       labelPreview,
     );
+    // Wire autocomplete after the field is in the DOM tree
+    this._attachUserAutocomplete(assigneeInput);
 
     body.append(leftCol, rightCol);
 

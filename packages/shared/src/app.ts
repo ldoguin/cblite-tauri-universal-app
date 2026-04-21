@@ -39,7 +39,7 @@ import {
 } from "./storage.js";
 import { generateSalt } from "./crypto.js";
 import {
-  serverLogin, serverRegister,
+  serverLogin, serverRegister, searchUsers,
   fetchSyncConfig as fetchSyncConfigFromServer,
 } from "./server.js";
 import type { SyncConfigFromServer } from "./server.js";
@@ -164,6 +164,7 @@ function setupComponents(): void {
 
   kanbanBoardEl = document.getElementById("kanban-board") as unknown as CblKanbanBoard;
   if (kanbanBoardEl) {
+    kanbanBoardEl.userSearch = searchUsersForInvite;
     kanbanBoardEl.addEventListener("cbl-task-move", (e) =>
       handleTaskMove((e as CustomEvent<TaskMoveDetail>).detail).catch(console.error)
     );
@@ -578,6 +579,163 @@ async function createBoard(name: string): Promise<void> {
   boards.push(saved);
   updateBoardSelector();
   await selectBoard(saved.id);
+}
+
+// ── Invite autocomplete ───────────────────────────────────────────────────────
+
+function wireInviteAutocomplete(): void {
+  const input = document.getElementById("invite-username-input") as HTMLInputElement | null;
+  const btn   = document.getElementById("btn-invite-member") as HTMLButtonElement | null;
+  if (!input) return;
+
+  // Dropdown container — appended to body so it escapes overflow:hidden parents
+  const dropdown = document.createElement("div");
+  dropdown.id = "invite-autocomplete";
+  dropdown.className = "invite-autocomplete";
+  dropdown.hidden = true;
+  document.body.appendChild(dropdown);
+
+  let debounceTimer = 0;
+  let activeIndex = -1;
+  let currentResults: string[] = [];
+
+  function positionDropdown(): void {
+    const rect = input.getBoundingClientRect();
+    dropdown.style.left   = `${rect.left + window.scrollX}px`;
+    dropdown.style.top    = `${rect.bottom + window.scrollY + 2}px`;
+    dropdown.style.width  = `${rect.width}px`;
+  }
+
+  function closeDropdown(): void {
+    dropdown.hidden = true;
+    activeIndex = -1;
+    currentResults = [];
+  }
+
+  function selectItem(username: string): void {
+    input.value = username;
+    closeDropdown();
+    input.focus();
+  }
+
+  function renderDropdown(usernames: string[]): void {
+    currentResults = usernames;
+    activeIndex = -1;
+    dropdown.innerHTML = "";
+
+    if (usernames.length === 0) {
+      closeDropdown();
+      return;
+    }
+
+    for (const u of usernames) {
+      const item = document.createElement("div");
+      item.className = "invite-autocomplete-item";
+
+      const avatar = document.createElement("span");
+      avatar.className = "invite-autocomplete-avatar";
+      avatar.textContent = u.slice(0, 2).toUpperCase();
+
+      const name = document.createElement("span");
+      name.textContent = u;
+
+      item.append(avatar, name);
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault(); // prevent input blur before click fires
+        selectItem(u);
+      });
+      dropdown.appendChild(item);
+    }
+
+    positionDropdown();
+    dropdown.hidden = false;
+  }
+
+  function highlightItem(index: number): void {
+    const items = dropdown.querySelectorAll<HTMLElement>(".invite-autocomplete-item");
+    items.forEach((el, i) => el.classList.toggle("active", i === index));
+    if (index >= 0 && index < items.length) {
+      items[index].scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  input.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (!q) { closeDropdown(); return; }
+    debounceTimer = window.setTimeout(async () => {
+      const results = await searchUsersForInvite(q);
+      renderDropdown(results);
+    }, 200);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (dropdown.hidden) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const username = input.value.trim();
+        if (username) inviteMember(username).then(() => { input.value = ""; }).catch(console.error);
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, currentResults.length - 1);
+      highlightItem(activeIndex);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, -1);
+      highlightItem(activeIndex);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIndex >= 0 && currentResults[activeIndex]) {
+        selectItem(currentResults[activeIndex]);
+      } else {
+        const username = input.value.trim();
+        if (username) {
+          closeDropdown();
+          inviteMember(username).then(() => { input.value = ""; }).catch(console.error);
+        }
+      }
+    } else if (e.key === "Escape") {
+      closeDropdown();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    // Small delay so mousedown on a dropdown item fires first
+    setTimeout(closeDropdown, 150);
+  });
+
+  input.addEventListener("focus", () => {
+    const q = input.value.trim();
+    if (q && currentResults.length > 0) {
+      positionDropdown();
+      dropdown.hidden = false;
+    }
+  });
+
+  // Reposition on scroll/resize
+  window.addEventListener("resize", () => { if (!dropdown.hidden) positionDropdown(); }, { passive: true });
+
+  if (btn) {
+    btn.addEventListener("click", () => {
+      const username = input.value.trim();
+      if (!username) return;
+      closeDropdown();
+      inviteMember(username).then(() => { input.value = ""; }).catch(console.error);
+    });
+  }
+}
+
+/** Called by the autocomplete widget to fetch matching usernames from the server. */
+export async function searchUsersForInvite(query: string): Promise<string[]> {
+  if (!authSession?.server_url || !authSession?.token) return [];
+  try {
+    return await searchUsers(authSession.server_url, authSession.token, query);
+  } catch {
+    return [];
+  }
 }
 
 async function inviteMember(username: string): Promise<void> {
@@ -1263,24 +1421,8 @@ function wireAppButtons(): void {
     await createBoard(name.trim());
   });
 
-  // Tasks: invite member
-  document.getElementById("btn-invite-member")?.addEventListener("click", async () => {
-    const input = document.getElementById("invite-username-input") as HTMLInputElement | null;
-    const username = input?.value.trim();
-    if (!username) return;
-    await inviteMember(username);
-    if (input) input.value = "";
-  });
-
-  document.getElementById("invite-username-input")?.addEventListener("keydown", async (e) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    const input = e.target as HTMLInputElement;
-    const username = input.value.trim();
-    if (!username) return;
-    await inviteMember(username);
-    input.value = "";
-  });
+  // Tasks: invite member — autocomplete
+  wireInviteAutocomplete();
 
   // Window close / page unload: flush any unsaved note
   _hooks.onWindowUnload(async () => {

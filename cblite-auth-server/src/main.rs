@@ -72,6 +72,12 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Warning: CORS_ORIGINS not set — browser WebSocket connections to SG will be rejected. Set CORS_ORIGINS=* or list specific origins.");
     }
 
+    // Always ensure auth-bucket indexes (needed for user search).
+    // Pass the auth bucket as both arguments when SG is not configured so the
+    // function still creates the primary + username indexes.
+    let notes_bucket_for_index = sg_db.as_deref().unwrap_or(&cb_bucket).to_owned();
+    db::ensure_indexes(&cb.cluster, &cb_bucket, &notes_bucket_for_index).await;
+
     if let (Some(admin_url), Some(db_name)) = (&sg_admin_url, &sg_db) {
         println!(
             "SG Admin API: {}/{} | sync: {}",
@@ -116,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/users", post(routes::users::register))
+        .route("/users/search", get(routes::users::search_users))
         .route("/auth/token", post(routes::sync::login))
         .route("/sync/config", get(routes::sync::get_sync_config))
         .route("/ai/chat", post(ai::chat))

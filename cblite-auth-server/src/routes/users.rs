@@ -1,8 +1,12 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{auth::hash_password, error::AppError, models::User, AppState};
+use crate::{auth::{hash_password, validate_jwt}, error::AppError, models::User, AppState};
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -86,4 +90,60 @@ pub async fn register(
     }
 
     Ok((StatusCode::CREATED, Json(RegisterResponse { user_id: id })))
+}
+
+// ── User search ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SearchResponse {
+    pub usernames: Vec<String>,
+}
+
+/// GET /users/search?q=<prefix>
+///
+/// Returns up to 20 usernames whose names contain the query string.
+/// Requires a valid Bearer JWT so only authenticated users can search.
+pub async fn search_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, AppError> {
+    // Require authentication
+    let bearer = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized)?;
+    let claims = validate_jwt(bearer, &state.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+
+    let q = params.q.unwrap_or_default();
+    let q = q.trim().to_lowercase();
+
+    // Query Couchbase for all user docs, filter by prefix match on username
+    let bucket = &state.cb.bucket;
+    let statement = format!(
+        "SELECT username FROM `{bucket}` WHERE META().id LIKE 'user::%' LIMIT 200"
+    );
+
+    let rows: Vec<serde_json::Value> = state
+        .cb
+        .sqlpp(&statement, serde_json::json!({}))
+        .await
+        .unwrap_or_default();
+
+    let caller = &claims.username;
+    let usernames: Vec<String> = rows
+        .into_iter()
+        .filter_map(|r| r["username"].as_str().map(str::to_owned))
+        .filter(|u| u != caller) // exclude the caller themselves
+        .filter(|u| q.is_empty() || u.to_lowercase().contains(&q))
+        .take(20)
+        .collect();
+
+    Ok(Json(SearchResponse { usernames }))
 }

@@ -81,3 +81,16 @@ export async function fetchSyncConfig(
   if (!res.ok) throw new Error(`Fetch config failed (${res.status}): ${await res.text()}`);
   return res.json();
 }
+
+/** Search registered users by prefix/substring. Returns up to 20 matching usernames. */
+export async function searchUsers(
+  baseUrl: string,
+  token: string,
+  query: string
+): Promise<string[]> {
+  const url = `${baseUrl}/users/search?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return [];
+  const json: { usernames: string[] } = await res.json();
+  return json.usernames ?? [];
+}

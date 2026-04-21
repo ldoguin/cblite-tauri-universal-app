@@ -27,7 +27,7 @@ let _replicationStatusHandler: ((activity: string, error?: string) => void) | nu
 // Collections created / accessed by this adapter.
 // "metadata" is used in place of "_default" because @couchbase/lite-js does
 // not expose the built-in _default collection via getCollection('_default').
-const NAMED_COLLECTIONS = ["notes", "conversations", "blobs", "metadata"] as const;
+const NAMED_COLLECTIONS = ["notes", "conversations", "tasks", "blobs", "metadata"] as const;
 
 /** Map the Tauri convention of using "_default" for app metadata to "metadata". */
 function resolveCollectionName(name: string): string {
@@ -180,6 +180,7 @@ export async function startReplication(
   const collectionsConfig: AnyRecord = {
     [collName]: directionConfig(),
     conversations: directionConfig(),
+    tasks: directionConfig(),
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -268,7 +269,7 @@ export async function onCollectionChanged(
 ): Promise<() => void> {
   const localTokens: Array<{ coll: unknown; token: unknown }> = [];
 
-  for (const collName of ["notes", "conversations"] as const) {
+  for (const collName of ["notes", "conversations", "tasks"] as const) {
     const coll = getCollection(collName);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const token = coll.addChangeListener((changes: any) => {
