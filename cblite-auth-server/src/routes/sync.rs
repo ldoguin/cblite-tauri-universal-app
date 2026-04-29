@@ -136,6 +136,7 @@ async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &
                 "notes":         { "admin_channels": [&user_channel] },
                 "conversations": { "admin_channels": [&user_channel] },
                 "tasks":         { "admin_channels": [&user_channel] },
+                "actions":       { "admin_channels": [&user_channel] },
             }
         }
     });

@@ -5,3 +5,7 @@ export { CblPendingAttachments } from "./pending-attachments.js";
 export { CblServerList } from "./server-list.js";
 export { CblKanbanBoard } from "./kanban-board.js";
 export type { TaskMoveDetail, TaskCreateDetail, TaskUpdateDetail, TaskDeleteDetail, ColumnCreateDetail, ColumnUpdateDetail, ColumnDeleteDetail } from "./kanban-board.js";
+export { CblActionCard } from "./action-card.js";
+export type { ActionApproveDetail, ActionRejectDetail, ActionEditDetail } from "./action-card.js";
+export { CblActionDrawer } from "./action-drawer.js";
+export type { ActionSaveDetail, ActionCloseDetail } from "./action-drawer.js";

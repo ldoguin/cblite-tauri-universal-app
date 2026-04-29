@@ -165,6 +165,15 @@ pub async fn ensure_indexes(cluster: &Cluster, auth_bucket: &str, notes_bucket: 
                  WITH {{\"num_replica\": 0}}"
             ),
         ),
+        // Actions collection: index on owner + scheduled_date for per-user daily queries.
+        (
+            "actions_owner_date",
+            &format!(
+                "CREATE INDEX IF NOT EXISTS `actions_owner_date` \
+                 ON `{notes_bucket}`.`_default`.`actions`(owner, scheduled_date, type) \
+                 WITH {{\"num_replica\": 0}}"
+            ),
+        ),
     ];
 
     for (name, stmt) in stmts {

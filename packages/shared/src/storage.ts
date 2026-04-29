@@ -1,7 +1,7 @@
 // ── DB helpers (adapter-agnostic) ─────────────────────────────────────────────
 
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
-import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task } from "./types.js";
+import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task, ActionItem, ActionStatus } from "./types.js";
 import { unwrapEncryptable, encryptNoteFields, decryptNoteFields } from "./note-encryption.js";
 
 // ── Config / profile ──────────────────────────────────────────────────────────
@@ -363,4 +363,83 @@ export async function deleteTaskDoc(
   boardId: string
 ): Promise<void> {
   await adapter.saveDocument("tasks", id, { deleted: true, board_id: boardId });
+}
+
+// ── Action Items ──────────────────────────────────────────────────────────────
+
+/**
+ * Load action items for a user.
+ * @param dateFilter  ISO date string (YYYY-MM-DD). When provided, returns only
+ *                    items whose scheduled_date matches OR is null.
+ */
+export async function loadActionItems(
+  adapter: DatabaseAdapter,
+  username: string,
+  dateFilter?: string
+): Promise<ActionItem[]> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, action_type, title, body, raw_payload," +
+        " status, owner, feedback, feedback_at, webhook_url, scheduled_date," +
+        " created_at, updated_at" +
+        " FROM actions" +
+        " WHERE type = 'action_item'" +
+        " AND owner = $username" +
+        " AND (deleted IS MISSING OR deleted = false)" +
+        " ORDER BY created_at DESC",
+      { username }
+    )) as ActionItem[];
+
+    const items = rows.filter((r) => r && r.id);
+
+    if (dateFilter) {
+      return items.filter(
+        (r) => r.scheduled_date === null || r.scheduled_date === dateFilter
+      );
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+export async function saveActionItem(
+  adapter: DatabaseAdapter,
+  item: ActionItem
+): Promise<ActionItem> {
+  const updated = { ...item, updated_at: new Date().toISOString() };
+  await adapter.saveDocument("actions", item.id, {
+    type: "action_item",
+    action_type: updated.action_type,
+    title: updated.title,
+    body: updated.body,
+    raw_payload: updated.raw_payload,
+    status: updated.status,
+    owner: updated.owner,
+    feedback: updated.feedback,
+    feedback_at: updated.feedback_at,
+    webhook_url: updated.webhook_url,
+    scheduled_date: updated.scheduled_date,
+    created_at: updated.created_at,
+    updated_at: updated.updated_at,
+  });
+  return updated;
+}
+
+export async function updateActionStatus(
+  adapter: DatabaseAdapter,
+  item: ActionItem,
+  status: ActionStatus,
+  feedback?: string
+): Promise<ActionItem> {
+  const now = new Date().toISOString();
+  const updated: ActionItem = {
+    ...item,
+    status,
+    feedback: feedback ?? item.feedback,
+    feedback_at: feedback ? now : item.feedback_at,
+    updated_at: now,
+  };
+  return saveActionItem(adapter, updated);
 }

@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         db::ensure_collection(&cb.cluster, notes_bucket, "_default", "notes").await;
         db::ensure_collection(&cb.cluster, notes_bucket, "_default", "conversations").await;
         db::ensure_collection(&cb.cluster, notes_bucket, "_default", "tasks").await;
+        db::ensure_collection(&cb.cluster, notes_bucket, "_default", "actions").await;
 
         ensure_sg_database(&http, admin_url, db_name, sg_bucket.as_deref(), sg_admin_auth.as_deref(), &cors_origins).await;
     }
@@ -188,13 +189,17 @@ async fn ensure_sg_database(
         "headers": ["Authorization"]
     });
 
+    // actions: routed to "user.<owner>" so each user only sees their own action items.
+    let actions_sync_fn = "function(doc,oldDoc){var o=doc.owner||(oldDoc&&oldDoc.owner);if(!o)throw({forbidden:'missing owner'});requireUser(o);channel('user.'+o);}";
+
     let scopes_config = serde_json::json!({
         "_default": {
             "collections": {
                 "_default":      { "sync": user_sync_fn },
                 "notes":         { "sync": user_sync_fn },
                 "conversations": { "sync": user_sync_fn },
-                "tasks":         { "sync": tasks_sync_fn }
+                "tasks":         { "sync": tasks_sync_fn },
+                "actions":       { "sync": actions_sync_fn }
             }
         }
     });
@@ -235,6 +240,7 @@ async fn ensure_sg_database(
             ("notes",         user_sync_fn),
             ("conversations", user_sync_fn),
             ("tasks",         tasks_sync_fn),
+            ("actions",       actions_sync_fn),
         ];
         for (coll, sfn) in coll_sync_pairs {
             let coll_url = format!(

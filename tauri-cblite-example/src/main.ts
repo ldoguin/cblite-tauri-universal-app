@@ -21,7 +21,7 @@ import type { UserProfile, EncryptionMode } from "@cblite-uni-app/shared";
 
 /**
  * Wraps the plugin's startReplication to always replicate notes, conversations,
- * and tasks in a single replicator via the patched `extraCollections` parameter.
+ * tasks, and actions in a single replicator via the patched `extraCollections` parameter.
  */
 function startReplication(
   url: string,
@@ -31,7 +31,7 @@ function startReplication(
   fieldEncryption?: { password: string; salt: string }
 ): Promise<void> {
   const primary = collection.includes(".") ? collection : `_default.${collection}`;
-  const extras = ["_default.notes", "_default.conversations", "_default.tasks"]
+  const extras = ["_default.notes", "_default.conversations", "_default.tasks", "_default.actions"]
     .filter((c) => c !== primary);
   return _startReplication(url, primary, direction, auth, fieldEncryption, extras);
 }

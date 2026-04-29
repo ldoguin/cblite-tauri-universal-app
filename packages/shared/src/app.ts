@@ -13,12 +13,14 @@ import Placeholder from "@tiptap/extension-placeholder";
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
 import type {
   Note, Conversation, SyncConfig, UserProfile, AuthSession, SavedServer,
-  ChatAttachment, EncryptionMode, Board, Column, Task,
+  ChatAttachment, EncryptionMode, Board, Column, Task, ActionItem,
 } from "./types.js";
 import type {
   CblNoteList, CblConvList, CblChatMessages, CblPendingAttachments, CblServerList, CblKanbanBoard,
   TaskMoveDetail, TaskCreateDetail, TaskUpdateDetail, TaskDeleteDetail,
   ColumnCreateDetail, ColumnUpdateDetail, ColumnDeleteDetail,
+  CblActionCard, CblActionDrawer,
+  ActionApproveDetail, ActionRejectDetail, ActionEditDetail, ActionSaveDetail,
 } from "./components/index.js";
 import {
   migrateOwnerField as migrateOwnerFieldDB,
@@ -36,6 +38,7 @@ import {
   loadBoards, saveBoardDoc, deleteBoardDoc,
   loadColumns, saveColumnDoc, deleteColumnDoc,
   loadTasks, saveTaskDoc, deleteTaskDoc,
+  loadActionItems, saveActionItem, updateActionStatus,
 } from "./storage.js";
 import { generateSalt } from "./crypto.js";
 import {
@@ -124,6 +127,11 @@ let selectedBoardId: string | null = null;
 let boardColumns: Column[] = [];
 let boardTasks: Task[] = [];
 
+// ── Actions state ─────────────────────────────────────────────────────────────
+let actionItems: ActionItem[] = [];
+let actionCardEls: CblActionCard[] = [];
+let actionDrawerEl: CblActionDrawer | null = null;
+
 // ── Error display ─────────────────────────────────────────────────────────────
 
 export function showError(msg: string): void {
@@ -161,6 +169,17 @@ function setupComponents(): void {
     pendingAttachments.splice((e as CustomEvent<{ index: number }>).detail.index, 1);
     pendingAttachmentsEl.attachments = [...pendingAttachments];
   });
+
+  actionDrawerEl = document.getElementById("action-drawer") as unknown as CblActionDrawer;
+  if (actionDrawerEl) {
+    actionDrawerEl.getAIReply = async (prompt: string) => {
+      const history = [{ role: "user" as const, content: prompt, timestamp: new Date().toISOString() }];
+      return getAIReplyShared(history, currentUser, authSession, (digest: string) => _adapter.getBlobData(digest));
+    };
+    actionDrawerEl.addEventListener("cbl-action-save", (e) =>
+      handleActionSave((e as CustomEvent<ActionSaveDetail>).detail).catch(console.error)
+    );
+  }
 
   kanbanBoardEl = document.getElementById("kanban-board") as unknown as CblKanbanBoard;
   if (kanbanBoardEl) {
@@ -562,6 +581,79 @@ async function handleColumnDelete(detail: ColumnDeleteDetail): Promise<void> {
   }
 }
 
+// ── Actions panel ─────────────────────────────────────────────────────────────
+
+async function loadActionsPanel(): Promise<void> {
+  if (!currentUser) return;
+  actionItems = await loadActionItems(_adapter, currentUser.username);
+  renderActionCards();
+}
+
+function renderActionCards(): void {
+  const container = document.getElementById("actions-list");
+  if (!container) return;
+
+  container.innerHTML = "";
+  actionCardEls = [];
+
+  const empty = document.getElementById("actions-empty");
+  if (empty) empty.hidden = actionItems.length > 0;
+
+  for (const item of actionItems) {
+    const card = document.createElement("cbl-action-card") as unknown as CblActionCard;
+    card.item = item;
+    card.addEventListener("cbl-action-approve", (e) =>
+      handleActionApprove((e as CustomEvent<ActionApproveDetail>).detail).catch(console.error)
+    );
+    card.addEventListener("cbl-action-reject", (e) =>
+      handleActionReject((e as CustomEvent<ActionRejectDetail>).detail).catch(console.error)
+    );
+    card.addEventListener("cbl-action-edit", (e) =>
+      handleActionEdit((e as CustomEvent<ActionEditDetail>).detail)
+    );
+    container.appendChild(card as unknown as HTMLElement);
+    actionCardEls.push(card);
+  }
+}
+
+async function handleActionApprove(detail: ActionApproveDetail): Promise<void> {
+  const updated = await updateActionStatus(_adapter, detail.item, "approved", null);
+  replaceActionItem(updated);
+  renderActionCards();
+}
+
+async function handleActionReject(detail: ActionRejectDetail): Promise<void> {
+  const updated = await updateActionStatus(_adapter, detail.item, "rejected", null);
+  replaceActionItem(updated);
+  renderActionCards();
+}
+
+function handleActionEdit(detail: ActionEditDetail): void {
+  if (actionDrawerEl) actionDrawerEl.item = detail.item;
+}
+
+async function handleActionSave(detail: ActionSaveDetail): Promise<void> {
+  const updated = await updateActionStatus(_adapter, detail.item, "modified", detail.feedback || null);
+  const withEdits: ActionItem = { ...updated, title: detail.title, body: detail.body };
+  const saved = await saveActionItem(_adapter, withEdits);
+  replaceActionItem(saved);
+  renderActionCards();
+
+  // Fire webhook if configured
+  if (saved.webhook_url && saved.feedback) {
+    fetch(saved.webhook_url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: saved.id, status: saved.status, feedback: saved.feedback }),
+    }).catch((err) => console.warn("[actions] webhook failed:", err));
+  }
+}
+
+function replaceActionItem(updated: ActionItem): void {
+  const idx = actionItems.findIndex((a) => a.id === updated.id);
+  if (idx >= 0) actionItems[idx] = updated; else actionItems.unshift(updated);
+}
+
 async function createBoard(name: string): Promise<void> {
   if (!currentUser) return;
   const now = new Date().toISOString();
@@ -775,18 +867,21 @@ async function inviteMember(username: string): Promise<void> {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-function showPanel(name: "notes" | "chat" | "profile" | "tasks"): void {
+function showPanel(name: "notes" | "chat" | "profile" | "tasks" | "actions"): void {
   document.getElementById("panel-notes")!.hidden = name !== "notes";
   document.getElementById("panel-chat")!.hidden = name !== "chat";
   document.getElementById("panel-profile")!.hidden = name !== "profile";
   document.getElementById("panel-tasks")!.hidden = name !== "tasks";
+  document.getElementById("panel-actions")?.toggleAttribute("hidden", name !== "actions");
   document.getElementById("nav-notes")!.classList.toggle("active", name === "notes");
   document.getElementById("nav-chat")!.classList.toggle("active", name === "chat");
   document.getElementById("nav-profile")!.classList.toggle("active", name === "profile");
   document.getElementById("nav-tasks")!.classList.toggle("active", name === "tasks");
-  document.querySelector<HTMLElement>("main.editor")!.hidden = name === "chat" || name === "tasks";
+  document.getElementById("nav-actions")?.classList.toggle("active", name === "actions");
+  document.querySelector<HTMLElement>("main.editor")!.hidden = name === "chat" || name === "tasks" || name === "actions";
   document.getElementById("chat-view")!.hidden = name !== "chat";
   document.getElementById("tasks-view")!.hidden = name !== "tasks";
+  document.getElementById("actions-view")?.toggleAttribute("hidden", name !== "actions");
   document.querySelector<HTMLElement>("main.editor")!.classList.remove("mobile-open");
   document.getElementById("chat-view")!.classList.remove("mobile-open");
 }
@@ -963,7 +1058,7 @@ async function handleLogin(
 
   await _adapter.closeDatabase();
   const encPassword = _hooks.getDbEncPassword(profile, password);
-  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks"]);
+  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions"]);
   if (profile.encryption_mode !== "none") encryptionPassword = password;
 
   const userSyncConfig = await loadSyncConfigDB(_adapter);
@@ -1041,7 +1136,7 @@ async function handleCreateAccount(
 
   await _adapter.closeDatabase();
   const encPassword = _hooks.getDbEncPassword(profile, password);
-  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks"]);
+  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions"]);
   if (encMode !== "none") encryptionPassword = password;
 
   await persistSavedServersDB(_adapter, savedServers);
@@ -1081,6 +1176,11 @@ async function handleLogout(): Promise<void> {
   boardColumns = [];
   boardTasks = [];
   if (kanbanBoardEl) { kanbanBoardEl.board = null; kanbanBoardEl.columns = []; kanbanBoardEl.tasks = []; }
+  actionItems = [];
+  actionCardEls = [];
+  if (actionDrawerEl) actionDrawerEl.item = null;
+  const actionsContainer = document.getElementById("actions-list");
+  if (actionsContainer) actionsContainer.innerHTML = "";
 
   document.getElementById("editor-empty")!.hidden = false;
   document.getElementById("editor-content")!.hidden = true;
@@ -1089,7 +1189,7 @@ async function handleLogout(): Promise<void> {
   noteListEl.selectedId = null;
   setStatus("Idle");
 
-  await _adapter.openDatabase(dbDir, "notes", undefined, ["notes", "conversations", "tasks"]);
+  await _adapter.openDatabase(dbDir, "notes", undefined, ["notes", "conversations", "tasks", "actions"]);
   savedServers = await loadSavedServersDB(_adapter);
   serverListEl.update(savedServers, serverUrl, document.getElementById("saved-servers-datalist") as HTMLDataListElement);
 
@@ -1142,6 +1242,11 @@ async function continueInit(): Promise<void> {
         kanbanBoardEl.tasks = boardTasks;
       }
     }
+    // Reload actions if the actions panel is active
+    if (!document.getElementById("panel-actions")?.hidden) {
+      actionItems = await loadActionItems(_adapter, currentUser!.username);
+      renderActionCards();
+    }
   });
 
   unlistenReplication = await _adapter.onReplicationStatus((activity: string, error?: string) => {
@@ -1167,6 +1272,9 @@ async function continueInit(): Promise<void> {
           }
         }).catch(console.error);
       }
+      loadActionItems(_adapter, currentUser!.username)
+        .then((items) => { actionItems = items; renderActionCards(); })
+        .catch(console.error);
     }
   });
 
@@ -1232,6 +1340,10 @@ function wireAppButtons(): void {
   document.getElementById("nav-tasks")!.addEventListener("click", async () => {
     showPanel("tasks");
     await loadTasksPanel();
+  });
+  document.getElementById("nav-actions")?.addEventListener("click", async () => {
+    showPanel("actions");
+    await loadActionsPanel();
   });
   document.getElementById("nav-profile")!.addEventListener("click", () => showPanel("profile"));
   document.querySelectorAll<HTMLButtonElement>(".profile-subnav-btn").forEach((btn) => {
@@ -1449,7 +1561,7 @@ export async function init(adapter: DatabaseAdapter, hooks: PlatformHooks): Prom
   wireAppButtons();
 
   try {
-    await _adapter.openDatabase(dbDir, "notes", undefined, ["notes", "conversations", "tasks"]);
+    await _adapter.openDatabase(dbDir, "notes", undefined, ["notes", "conversations", "tasks", "actions"]);
     unlistenReplication = await _adapter.onReplicationStatus((activity: string) => {
       setStatus(activity);
     });

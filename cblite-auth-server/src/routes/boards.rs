@@ -89,6 +89,7 @@ pub async fn grant_board_channel(state: &AppState, username: &str, board_id: &st
                 "notes":         { "admin_channels": [&user_channel] },
                 "conversations": { "admin_channels": [&user_channel] },
                 "tasks":         { "admin_channels": channels },
+                "actions":       { "admin_channels": [&user_channel] },
             }
         }
     });

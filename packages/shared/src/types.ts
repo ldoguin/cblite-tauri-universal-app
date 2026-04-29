@@ -102,3 +102,30 @@ export interface Task {
   created_at: string;
   updated_at: string;
 }
+
+// ── Daily Actions ─────────────────────────────────────────────────────────────
+
+export type ActionStatus = "pending" | "approved" | "rejected" | "modified";
+
+export interface ActionItem {
+  id: string;
+  type: "action_item";
+  /** Free string identifying the kind of action, e.g. "email", "calendar_event", "webhook". */
+  action_type: string;
+  title: string;
+  /** Human-readable rendered text set by the agent. Editable by the user. */
+  body: string;
+  /** Opaque JSON blob the agent uses when executing. Never interpreted by the app. */
+  raw_payload: Record<string, unknown>;
+  status: ActionStatus;
+  owner: string;
+  /** Free-text note written by the user when modifying. Sent in webhook POST. */
+  feedback: string | null;
+  feedback_at: string | null;
+  /** If set, the app POSTs modification feedback to this URL. */
+  webhook_url: string | null;
+  /** ISO date string (YYYY-MM-DD) used for the "today" filter. */
+  scheduled_date: string | null;
+  created_at: string;
+  updated_at: string;
+}

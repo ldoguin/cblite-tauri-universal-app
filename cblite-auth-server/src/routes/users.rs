@@ -75,6 +75,7 @@ pub async fn register(
                     "notes":         { "admin_channels": [&user_channel] },
                     "conversations": { "admin_channels": [&user_channel] },
                     "tasks":         { "admin_channels": [&user_channel] },
+                    "actions":       { "admin_channels": [&user_channel] },
                 }
             }
         });

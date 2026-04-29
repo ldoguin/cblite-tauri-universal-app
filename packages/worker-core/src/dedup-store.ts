@@ -1,0 +1,74 @@
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyRecord = Record<string, any>;
+
+interface CblModule {
+  Database: {
+    open(opts: { name: string; directory?: string; version: number; collections: AnyRecord }): Promise<AnyRecord>;
+  };
+  DocID: (id: string) => string;
+}
+
+let _cbl: CblModule | null = null;
+async function cbl(): Promise<CblModule> {
+  if (!_cbl) _cbl = await import("@couchbase/lite-js") as unknown as CblModule;
+  return _cbl;
+}
+
+const COLLECTION_NAME = "processed_events";
+
+export class DedupStore {
+  private db: AnyRecord | null = null;
+  private readonly dbPath: string;
+  private readonly dbName: string;
+
+  constructor(dbPath: string, dbName = "worker-state") {
+    this.dbPath = dbPath;
+    this.dbName = dbName;
+  }
+
+  async open(): Promise<void> {
+    const { Database } = await cbl();
+    this.db = await Database.open({
+      name: this.dbName,
+      directory: this.dbPath,
+      version: 1,
+      collections: { [COLLECTION_NAME]: {} },
+    });
+    console.log(`[dedup] State DB '${this.dbName}' opened at ${this.dbPath}`);
+  }
+
+  async close(): Promise<void> {
+    if (!this.db) return;
+    try { await this.db.close(); } catch { /* ignore */ }
+    this.db = null;
+  }
+
+  async isProcessed(eventId: string): Promise<boolean> {
+    const coll = this.collection();
+    const { DocID } = await cbl();
+    const doc = await coll.getDocument(DocID(this.docId(eventId)));
+    return doc !== null && doc !== undefined;
+  }
+
+  async markProcessed(eventId: string): Promise<void> {
+    const coll = this.collection();
+    const { DocID } = await cbl();
+    const id = this.docId(eventId);
+    const existing = await coll.getDocument(DocID(id));
+    if (existing) return;
+    const doc = coll.createDocument(DocID(id), {
+      event_id: eventId,
+      processed_at: new Date().toISOString(),
+    });
+    await coll.save(doc);
+  }
+
+  private collection(): AnyRecord {
+    if (!this.db) throw new Error("[dedup] Store not open. Call open() first.");
+    return this.db.getCollection(COLLECTION_NAME);
+  }
+
+  private docId(eventId: string): string {
+    return "evt::" + Buffer.from(eventId).toString("base64url");
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "whatsapp-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "node --loader ts-node/esm src/index.ts", "build": "tsc", "start": "node dist/index.js" },
+  "dependencies": {
+    "@cblite-uni-app/worker-core": "workspace:*",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": { "@types/node": "^20.14.0", "ts-node": "^10.9.2", "typescript": "^5.4.5" }
+}

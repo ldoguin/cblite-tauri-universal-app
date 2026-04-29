@@ -58,6 +58,12 @@
               <line x1="9" y1="9" x2="9" y2="21"/>
             </svg>
           </button>
+          <button class="rail-btn" id="nav-actions" data-panel="actions" title="Actions">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 11l3 3L22 4"/>
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+          </button>
           <button class="rail-btn" id="nav-profile" data-panel="profile" title="Profile">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
@@ -116,6 +122,13 @@
       <aside class="panel" id="panel-tasks" hidden>
         <header class="panel-header">
           <span class="panel-title">Tasks</span>
+        </header>
+      </aside>
+
+      <!-- ── Actions Panel ─────────────────────────────────────── -->
+      <aside class="panel" id="panel-actions" hidden>
+        <header class="panel-header">
+          <span class="panel-title">Actions</span>
         </header>
       </aside>
 
@@ -373,6 +386,19 @@
         </div>
         <cbl-kanban-board id="kanban-board"></cbl-kanban-board>
       </div>
+
+      <!-- ── Actions View ──────────────────────────────────────── -->
+      <div id="actions-view" class="chat-view" hidden>
+        <div class="actions-toolbar">
+          <h2>Today's Actions</h2>
+        </div>
+        <div id="actions-list">
+          <p id="actions-empty">No actions for today.</p>
+        </div>
+      </div>
+
+      <!-- ── Action Drawer ─────────────────────────────────────── -->
+      <cbl-action-drawer id="action-drawer" class="action-drawer"></cbl-action-drawer>
 
     <!-- Datalist of saved servers — populated by JS -->
     <datalist id="saved-servers-datalist"></datalist>
