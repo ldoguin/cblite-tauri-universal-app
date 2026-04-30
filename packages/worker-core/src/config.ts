@@ -1,4 +1,4 @@
-import type { BaseWorkerConfig, LlmMode, SgConfig, UserConfig } from "./types.js";
+import type { BaseWorkerConfig, EmbeddingConfig, LlmMode, SgConfig, UserConfig } from "./types.js";
 
 /** Parse the common env vars shared by every worker. */
 export function loadBaseConfig(): Omit<BaseWorkerConfig, "pollIntervalSeconds"> {
@@ -19,6 +19,17 @@ export function loadBaseConfig(): Omit<BaseWorkerConfig, "pollIntervalSeconds"> 
     sg: loadSgConfig(),
     webhookPort: webhookPortRaw ? parseInt(webhookPortRaw, 10) : undefined,
     stateDbPath: process.env["STATE_DB_PATH"] ?? "./data",
+    embedding: loadEmbeddingConfig(),
+  };
+}
+
+/** Parse embedding / chunking env vars. */
+export function loadEmbeddingConfig(): EmbeddingConfig {
+  return {
+    model: process.env["EMBEDDING_MODEL"] ?? "text-embedding-3-large",
+    chunkSize: parseInt(process.env["CHUNK_SIZE"] ?? "512", 10),
+    chunkOverlap: parseInt(process.env["CHUNK_OVERLAP"] ?? "64", 10),
+    ragTopK: parseInt(process.env["RAG_TOP_K"] ?? "5", 10),
   };
 }
 

@@ -1,7 +1,7 @@
 // ── DB helpers (adapter-agnostic) ─────────────────────────────────────────────
 
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
-import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task, ActionItem, ActionStatus } from "./types.js";
+import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task, ActionItem, ActionStatus, ChunkDoc } from "./types.js";
 import { unwrapEncryptable, encryptNoteFields, decryptNoteFields } from "./note-encryption.js";
 
 // ── Config / profile ──────────────────────────────────────────────────────────
@@ -442,4 +442,69 @@ export async function updateActionStatus(
     updated_at: now,
   };
   return saveActionItem(adapter, updated);
+}
+
+// ── Chunks ────────────────────────────────────────────────────────────────────
+
+/** Upsert a chunk document in the `chunks` collection. */
+export async function saveChunkDoc(
+  adapter: DatabaseAdapter,
+  chunk: ChunkDoc
+): Promise<void> {
+  await adapter.saveDocument("chunks", chunk.id, {
+    type: "chunk",
+    source_id: chunk.source_id,
+    source_collection: chunk.source_collection,
+    source_owner: chunk.source_owner,
+    chunk_index: chunk.chunk_index,
+    text: chunk.text,
+    ...(chunk.local_embedding !== undefined ? { local_embedding: chunk.local_embedding } : {}),
+    ...(chunk.server_embedding !== undefined ? { server_embedding: chunk.server_embedding } : {}),
+    created_at: chunk.created_at,
+    updated_at: chunk.updated_at,
+  });
+}
+
+/** Load all chunk docs for a given source document. */
+export async function loadChunksBySource(
+  adapter: DatabaseAdapter,
+  sourceId: string
+): Promise<ChunkDoc[]> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, source_id, source_collection, source_owner," +
+        " chunk_index, text, local_embedding, server_embedding, created_at, updated_at" +
+        " FROM chunks" +
+        " WHERE type = 'chunk' AND source_id = $sourceId" +
+        " ORDER BY chunk_index ASC",
+      { sourceId }
+    )) as ChunkDoc[];
+    return rows.filter((r) => r && r.id);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Ensure a CBLite vector index exists on the `local_embedding` field of the
+ * `chunks` collection. Called once after the database is opened.
+ *
+ * Uses the `registerPredictiveModel` adapter hook as a proxy — the actual
+ * vector index creation is handled by the Tauri plugin via the ONNX model
+ * registration path. For the web adapter this is a no-op.
+ */
+export async function ensureVectorIndex(adapter: DatabaseAdapter): Promise<void> {
+  try {
+    // The Tauri plugin creates the vector index when a predictive model named
+    // "local_embedding_index" is registered with onnxPath set to the sentinel
+    // value "vector_index:chunks:local_embedding".
+    await adapter.registerPredictiveModel("local_embedding_index", {
+      onnxPath: "vector_index:chunks:local_embedding",
+      inputField: "text",
+      outputField: "local_embedding",
+    });
+  } catch {
+    // Non-fatal — vector search degrades to BM25 FTS if index is unavailable.
+  }
 }

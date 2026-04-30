@@ -1,6 +1,7 @@
 import axios from "axios";
 import { z } from "zod";
-import type { ActionItemDraft, LlmConfig, LlmMode, SourceEvent } from "./types.js";
+import type { ActionItemDraft, LlmConfig, LlmMode, SourceEvent, UserKnowledgeBase } from "./types.js";
+import { renderKbForPrompt } from "./knowledge-base.js";
 
 // ── Zod schema ────────────────────────────────────────────────────────────────
 
@@ -15,7 +16,7 @@ const LLMResponseSchema = z.array(ActionItemDraftSchema);
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an action-extraction assistant. Given an event from any source (email, GitHub, Slack, Jira, etc.), decide whether it requires any follow-up actions from the recipient.
+const BASE_SYSTEM_PROMPT = `You are an action-extraction assistant. Given an event from any source (email, GitHub, Slack, Jira, etc.), decide whether it requires any follow-up actions from the recipient.
 
 Return a JSON array of action items. Return an empty array [] if no action is needed.
 
@@ -42,19 +43,38 @@ Rules:
 - One event can produce multiple actions if truly needed
 - Respond with ONLY the JSON array, no markdown, no explanation`;
 
+function buildSystemPrompt(kb?: UserKnowledgeBase, ragContext?: string): string {
+  const parts: string[] = [BASE_SYSTEM_PROMPT];
+
+  if (kb) {
+    const kbSection = renderKbForPrompt(kb);
+    if (kbSection) parts.push(`\n# Context about the recipient\n${kbSection}`);
+  }
+
+  if (ragContext?.trim()) {
+    parts.push(`\n${ragContext.trim()}`);
+  }
+
+  return parts.join("");
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 /**
  * Extract action item drafts from a source event.
  *
- * @param event   The normalised source event.
- * @param config  LLM connection config.
- * @param mode    "llm" = ask the model; "passthrough" = one draft directly from event fields.
+ * @param event       The normalised source event.
+ * @param config      LLM connection config.
+ * @param mode        "llm" = ask the model; "passthrough" = one draft directly from event fields.
+ * @param kb          Optional user knowledge base — injected into the system prompt.
+ * @param ragContext  Optional RAG context string — injected after the KB section.
  */
 export async function extractActions(
   event: SourceEvent,
   config: LlmConfig,
-  mode: LlmMode = "llm"
+  mode: LlmMode = "llm",
+  kb?: UserKnowledgeBase,
+  ragContext?: string
 ): Promise<ActionItemDraft[]> {
   if (mode === "passthrough") {
     return [
@@ -67,6 +87,7 @@ export async function extractActions(
     ];
   }
 
+  const systemPrompt = buildSystemPrompt(kb, ragContext);
   const userMessage = formatEventForLLM(event);
   const baseUrl = config.baseUrl.replace(/\/$/, "");
   const url = `${baseUrl}/chat/completions`;
@@ -78,7 +99,7 @@ export async function extractActions(
       {
         model: config.model,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
         temperature: 0.2,

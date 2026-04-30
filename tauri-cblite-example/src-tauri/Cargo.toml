@@ -29,9 +29,9 @@ serde_json = "1"
 
 # Desktop: use the Enterprise CBL native library (encryption + predictive queries).
 [target.'cfg(not(target_os = "android"))'.dependencies]
-tauri-plugin-cblite = {  git = "https://github.com/ldoguin/tauri-plugin-cblite", features = ["enterprise"] }
+tauri-plugin-cblite = { path = "../tauri-plugin-cblite", features = ["enterprise"] }
 
 # Android: CBL is handled entirely in Kotlin — no native library needed.
 [target.'cfg(target_os = "android")'.dependencies]
-tauri-plugin-cblite = {  git = "https://github.com/ldoguin/tauri-plugin-cblite" }
+tauri-plugin-cblite = { path = "../tauri-plugin-cblite" }
 

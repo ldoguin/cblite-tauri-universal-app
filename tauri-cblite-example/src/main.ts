@@ -21,7 +21,11 @@ import type { UserProfile, EncryptionMode } from "@cblite-uni-app/shared";
 
 /**
  * Wraps the plugin's startReplication to always replicate notes, conversations,
- * tasks, and actions in a single replicator via the patched `extraCollections` parameter.
+ * tasks, actions, and chunks together in a single replicator.
+ *
+ * Local isolation of local_only documents is handled at two levels:
+ *   1. The app omits local-only collections from the replicator list (app-level).
+ *   2. The SG sync function throws forbidden when local_only === true (server-level).
  */
 function startReplication(
   url: string,
@@ -31,8 +35,13 @@ function startReplication(
   fieldEncryption?: { password: string; salt: string }
 ): Promise<void> {
   const primary = collection.includes(".") ? collection : `_default.${collection}`;
-  const extras = ["_default.notes", "_default.conversations", "_default.tasks", "_default.actions"]
-    .filter((c) => c !== primary);
+  const extras = [
+    "_default.notes",
+    "_default.conversations",
+    "_default.tasks",
+    "_default.actions",
+    "_default.chunks",
+  ].filter((c) => c !== primary);
   return _startReplication(url, primary, direction, auth, fieldEncryption, extras);
 }
 

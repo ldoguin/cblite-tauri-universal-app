@@ -3,6 +3,8 @@
 import { aiChat } from "./server.js";
 import type { ChatMessage, AuthSession, UserProfile } from "./types.js";
 import type { OpenAIMessage, OpenAIContentPart } from "./server.js";
+import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
+import { retrieveLocalContext } from "./rag.js";
 
 export async function buildOpenAIMessages(
   history: ChatMessage[],
@@ -35,11 +37,27 @@ export async function getAIReply(
   history: ChatMessage[],
   user: UserProfile | null,
   authSession: AuthSession | null,
-  getBlobData: (digest: string) => Promise<string>
+  getBlobData: (digest: string) => Promise<string>,
+  adapter?: DatabaseAdapter
 ): Promise<string> {
   const apiKey = user?.openai_api_key?.trim() || undefined;
   const openaiBaseUrl = user?.openai_base_url?.trim() || "https://api.openai.com/v1";
-  const messages = await buildOpenAIMessages(history, getBlobData);
+
+  // Retrieve local RAG context from the last user message (non-fatal)
+  let ragContext = "";
+  if (adapter) {
+    const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
+    if (lastUserMsg) {
+      ragContext = await retrieveLocalContext(lastUserMsg.content, adapter)
+        .catch((e) => { console.warn("[ai] RAG retrieval failed:", e); return ""; });
+    }
+  }
+
+  // Prepend a RAG system message when context is available
+  const baseMessages = await buildOpenAIMessages(history, getBlobData);
+  const messages: OpenAIMessage[] = ragContext
+    ? [{ role: "system", content: ragContext }, ...baseMessages]
+    : baseMessages;
 
   // Proxy through the auth server when connected — server may supply its own key.
   if (authSession?.server_url && authSession.token) {

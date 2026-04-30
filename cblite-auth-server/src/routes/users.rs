@@ -6,7 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{auth::{hash_password, validate_jwt}, error::AppError, models::User, AppState};
+use crate::{auth::{hash_password, validate_jwt}, db, error::AppError, models::User, AppState};
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -61,10 +61,20 @@ pub async fn register(
     });
     state.cb.upsert(&format!("sync_config::{id}"), &sync_config).await?;
 
-    // Create the user on Sync Gateway (best-effort)
+    // ── Per-user private scope + collections ──────────────────────────────────
+    db::ensure_private_scope(&state.cb.cluster, &state.private_bucket, username).await;
+
+    // ── Vector search index for server embeddings ─────────────────────────────
+    db::ensure_vector_index(
+        &state.http,
+        &state.cb_search_url,
+        &state.cb_credentials,
+        &state.private_bucket,
+        username,
+    ).await;
+
+    // ── Create user in private SG database ────────────────────────────────────
     if let (Some(sg_url), Some(sg_db)) = (&state.sg_admin_url, &state.sg_db) {
-        // In SG 3.x, top-level admin_channels only applies to _default._default.
-        // Named collections require explicit collection_access entries.
         let user_channel = format!("user.{username}");
         let sg_user = serde_json::json!({
             "name": username,
@@ -76,18 +86,24 @@ pub async fn register(
                     "conversations": { "admin_channels": [&user_channel] },
                     "tasks":         { "admin_channels": [&user_channel] },
                     "actions":       { "admin_channels": [&user_channel] },
+                    "chunks":        { "admin_channels": [&user_channel] },
                 }
             }
         });
         let mut req = state.http
-            .post(format!("{}/{}/_user/", sg_url, sg_db))
+            .post(format!("{sg_url}/{sg_db}/_user/"))
             .json(&sg_user);
         if let Some(auth) = &state.sg_admin_auth {
             req = req.header("Authorization", auth);
         }
         if let Err(e) = req.send().await {
-            eprintln!("SG user creation failed (non-fatal): {e}");
+            eprintln!("SG private-db user creation failed (non-fatal): {e}");
         }
+    }
+
+    // ── Grant public-reader role in public SG database ────────────────────────
+    if let (Some(sg_url), Some(pub_db)) = (&state.sg_admin_url, &state.sg_public_db) {
+        grant_public_reader_role(&state.http, sg_url, pub_db, username, state.sg_admin_auth.as_deref()).await;
     }
 
     Ok((StatusCode::CREATED, Json(RegisterResponse { user_id: id })))
@@ -103,6 +119,39 @@ pub struct SearchQuery {
 #[derive(Serialize)]
 pub struct SearchResponse {
     pub usernames: Vec<String>,
+}
+
+/// Grant the `public-reader` role to a user in the public SG database.
+async fn grant_public_reader_role(
+    http: &reqwest::Client,
+    sg_url: &str,
+    pub_db: &str,
+    username: &str,
+    admin_auth: Option<&str>,
+) {
+    // First ensure the user exists in the public DB (create if missing)
+    let user_url = format!("{sg_url}/{pub_db}/_user/{username}");
+    let body = serde_json::json!({
+        "name": username,
+        "admin_roles": ["public-reader"],
+        "admin_channels": ["public"],
+        "collection_access": {
+            "_default": {
+                "articles":         { "admin_channels": ["public"] },
+                "templates":        { "admin_channels": ["public"] },
+                "shared_knowledge": { "admin_channels": ["public"] },
+                "chunks":           { "admin_channels": ["public"] },
+            }
+        }
+    });
+    let mut req = http.put(&user_url).json(&body);
+    if let Some(a) = admin_auth { req = req.header("Authorization", a); }
+    match req.send().await {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 200 || r.status().as_u16() == 201 =>
+            println!("SG public-db: granted public-reader to '{username}'."),
+        Ok(r) => eprintln!("SG public-db user grant failed for '{username}' ({}): {}", r.status(), r.text().await.unwrap_or_default()),
+        Err(e) => eprintln!("SG public-db user grant request failed for '{username}': {e}"),
+    }
 }
 
 /// GET /users/search?q=<prefix>

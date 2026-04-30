@@ -55,9 +55,12 @@ export interface AuthSession {
   username: string;
   /** Plaintext password kept for platforms that use basic auth (web). */
   password?: string;
-  /** SG session cookie issued by the auth server (preferred over basic auth) */
+  /** SG session cookie for the private database (preferred over basic auth) */
   gateway_session_id?: string;
   gateway_cookie_name?: string;
+  /** Public database sync URL — pull-only, no auth required beyond session */
+  public_sync_url?: string;
+  public_sync_collection?: string;
 }
 
 export interface SavedServer {
@@ -99,6 +102,29 @@ export interface Task {
   labels: string[];
   position: number;
   owner: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Chunk documents ───────────────────────────────────────────────────────────
+
+export interface ChunkDoc {
+  id: string;                   // "chunk::<sourceDocId>::<index>"
+  type: "chunk";
+  source_id: string;
+  source_collection: string;
+  source_owner: string;
+  chunk_index: number;
+  text: string;
+  /** Local embedding (~384 dims, MiniLM). Set by the Tauri app after save. */
+  local_embedding?: number[];
+  /** Server embedding (~3072 dims). Set by workers before SG write. */
+  server_embedding?: number[];
+  /**
+   * When true the push filter excludes this doc from SG replication.
+   * Set on locally-embedded chunks that should never leave the device.
+   */
+  local_only?: boolean;
   created_at: string;
   updated_at: string;
 }

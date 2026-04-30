@@ -10,6 +10,12 @@ export interface SyncConfigFromServer {
   gateway_cookie_name?: string;
 }
 
+/** Dual sync config returned by the new auth server login response. */
+export interface SyncConfigsFromServer {
+  private: SyncConfigFromServer;
+  public: SyncConfigFromServer;
+}
+
 export async function serverRegister(
   baseUrl: string,
   data: {
@@ -33,7 +39,7 @@ export async function serverLogin(
   baseUrl: string,
   username: string,
   password: string
-): Promise<{ token: string; sync_config: SyncConfigFromServer }> {
+): Promise<{ token: string; sync_config: SyncConfigFromServer; sync_configs?: SyncConfigsFromServer }> {
   const res = await fetch(`${baseUrl}/auth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

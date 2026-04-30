@@ -4,6 +4,7 @@ use axum::{
 };
 use routes::ai;
 use tower_http::cors::{Any, CorsLayer};
+use std::collections::HashMap;
 
 mod auth;
 mod db;
@@ -13,16 +14,46 @@ mod routes;
 
 use db::CouchbaseClient;
 
+// ── Sync function types ───────────────────────────────────────────────────────
+
+/// Sync functions keyed by scope → collection → JS function string.
+/// Mirrors the SG Admin API scopes/collections config structure.
+type SyncFunctions = HashMap<String, HashMap<String, String>>;
+
+/// Load sync functions from a JSON file.
+///
+/// Expected format:
+/// ```json
+/// {
+///   "_default": {
+///     "notes":   "function(doc, oldDoc) { ... }",
+///     "actions": "function(doc, oldDoc) { ... }"
+///   }
+/// }
+/// ```
+///
+/// Panics with a clear message if the file is missing or contains invalid JSON.
+fn load_sync_functions(path: &str) -> SyncFunctions {
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read sync function file '{path}': {e}"));
+    serde_json::from_str::<SyncFunctions>(&content)
+        .unwrap_or_else(|e| panic!("Invalid JSON in sync function file '{path}': {e}"))
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub cb: CouchbaseClient,
     pub jwt_secret: String,
     /// Optional: base URL of the SG Admin API, e.g. "http://localhost:4985"
     pub sg_admin_url: Option<String>,
-    /// Optional: SG database name, e.g. "notes"
+    /// Optional: SG database name for the private bucket, e.g. "private-db"
     pub sg_db: Option<String>,
-    /// Optional: public WebSocket URL clients use for replication, e.g. "ws://localhost:4984/notes"
+    /// Optional: SG database name for the public bucket, e.g. "public-db"
+    pub sg_public_db: Option<String>,
+    /// Optional: public WebSocket URL clients use for private replication
     pub sg_sync_url: Option<String>,
+    /// Optional: public WebSocket URL clients use for public replication
+    pub sg_public_sync_url: Option<String>,
     /// Optional: "Basic base64(user:pass)" header value for SG Admin API
     pub sg_admin_auth: Option<String>,
     pub http: reqwest::Client,
@@ -30,6 +61,12 @@ pub struct AppState {
     pub openai_api_key: Option<String>,
     /// Optional OpenAI-compatible base URL (e.g. for Ollama or Azure); overridden per-request.
     pub openai_base_url: Option<String>,
+    /// Name of the private Couchbase bucket (per-user scopes live here).
+    pub private_bucket: String,
+    /// Couchbase management REST URL for vector index creation, e.g. "http://localhost:8094"
+    pub cb_search_url: String,
+    /// "user:pass" for Couchbase REST auth (used for vector index management).
+    pub cb_credentials: String,
 }
 
 #[tokio::main]
@@ -50,18 +87,29 @@ async fn main() -> anyhow::Result<()> {
     db::ensure_bucket(&cb.cluster, &cb_bucket, 100).await;
 
     // Sync Gateway config
-    let sg_admin_url = std::env::var("SYNC_GATEWAY_ADMIN_URL").ok();
-    let sg_db        = std::env::var("SYNC_GATEWAY_DB").ok();
-    let sg_sync_url  = std::env::var("SYNC_GATEWAY_SYNC_URL").ok();
-    let sg_bucket    = std::env::var("SYNC_GATEWAY_BUCKET").ok().or_else(|| sg_db.clone());
+    let sg_admin_url  = std::env::var("SYNC_GATEWAY_ADMIN_URL").ok();
     let sg_admin_auth = std::env::var("SYNC_GATEWAY_ADMIN_AUTH").ok();
+
+    // Private database (per-user scopes)
+    let sg_db         = std::env::var("SG_PRIVATE_DB")
+        .or_else(|_| std::env::var("SYNC_GATEWAY_DB"))
+        .ok();
+    let sg_sync_url   = std::env::var("SYNC_GATEWAY_SYNC_URL").ok();
+    let private_bucket = std::env::var("PRIVATE_BUCKET").unwrap_or_else(|_| "private".into());
+
+    // Public database (shared reference data)
+    let sg_public_db       = std::env::var("SG_PUBLIC_DB").ok();
+    let sg_public_sync_url = std::env::var("SG_PUBLIC_SYNC_URL").ok();
+    let public_bucket      = std::env::var("PUBLIC_BUCKET").unwrap_or_else(|_| "public".into());
+
+    // Couchbase search/management endpoint for vector index creation
+    let cb_search_url  = std::env::var("CB_SEARCH_URL").unwrap_or_else(|_| "http://localhost:8094".into());
+    let cb_credentials = format!("{cb_username}:{cb_password}");
 
     let http = reqwest::Client::new();
 
     // CORS origins forwarded to the SG database config so browsers can
-    // connect via WebSocket BLIP.  Use "*" to allow all origins (works in SG 4.x),
-    // or a comma-separated list of exact origins for stricter control,
-    // e.g. "http://localhost:5173,https://myapp.com".
+    // connect via WebSocket BLIP.
     let cors_origins: Vec<String> = std::env::var("CORS_ORIGINS")
         .unwrap_or_default()
         .split(',')
@@ -69,39 +117,53 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
     if cors_origins.is_empty() {
-        eprintln!("Warning: CORS_ORIGINS not set — browser WebSocket connections to SG will be rejected. Set CORS_ORIGINS=* or list specific origins.");
+        eprintln!("Warning: CORS_ORIGINS not set — browser WebSocket connections to SG will be rejected.");
     }
 
-    // Always ensure auth-bucket indexes (needed for user search).
-    // Pass the auth bucket as both arguments when SG is not configured so the
-    // function still creates the primary + username indexes.
-    let notes_bucket_for_index = sg_db.as_deref().unwrap_or(&cb_bucket).to_owned();
-    db::ensure_indexes(&cb.cluster, &cb_bucket, &notes_bucket_for_index).await;
+    // Ensure auth-bucket indexes (needed for user search).
+    db::ensure_indexes(&cb.cluster, &cb_bucket, &private_bucket).await;
 
-    if let (Some(admin_url), Some(db_name)) = (&sg_admin_url, &sg_db) {
-        println!(
-            "SG Admin API: {}/{} | sync: {}",
-            admin_url,
-            db_name,
-            sg_sync_url.as_deref().unwrap_or("(not set)")
-        );
+    // Load external sync functions if env vars are set — fail loudly on error.
+    let private_sync_fns: Option<SyncFunctions> = std::env::var("SG_PRIVATE_SYNC_FN")
+        .ok()
+        .map(|path| load_sync_functions(&path));
+    let public_sync_fns: Option<SyncFunctions> = std::env::var("SG_PUBLIC_SYNC_FN")
+        .ok()
+        .map(|path| load_sync_functions(&path));
 
-        // Ensure the Couchbase bucket that SG will use also exists
-        let notes_bucket = sg_bucket.as_deref().unwrap_or(db_name.as_str());
-        db::ensure_bucket(&cb.cluster, notes_bucket, 256).await;
-        db::ensure_collection(&cb.cluster, notes_bucket, "_default", "notes").await;
-        db::ensure_collection(&cb.cluster, notes_bucket, "_default", "conversations").await;
-        db::ensure_collection(&cb.cluster, notes_bucket, "_default", "tasks").await;
-        db::ensure_collection(&cb.cluster, notes_bucket, "_default", "actions").await;
+    if let Some(admin_url) = &sg_admin_url {
+        // ── Private bucket + SG database ─────────────────────────────────────
+        db::ensure_bucket(&cb.cluster, &private_bucket, 512).await;
+        // _default scope collections still needed for legacy/migration path
+        db::ensure_collection(&cb.cluster, &private_bucket, "_default", "notes").await;
+        db::ensure_collection(&cb.cluster, &private_bucket, "_default", "conversations").await;
+        db::ensure_collection(&cb.cluster, &private_bucket, "_default", "tasks").await;
+        db::ensure_collection(&cb.cluster, &private_bucket, "_default", "actions").await;
+        db::ensure_collection(&cb.cluster, &private_bucket, "_default", "chunks").await;
 
-        ensure_sg_database(&http, admin_url, db_name, sg_bucket.as_deref(), sg_admin_auth.as_deref(), &cors_origins).await;
+        if let Some(db_name) = &sg_db {
+            println!("SG private-db: {admin_url}/{db_name} | sync: {}", sg_sync_url.as_deref().unwrap_or("(not set)"));
+            ensure_sg_private_database(&http, admin_url, db_name, &private_bucket, sg_admin_auth.as_deref(), &cors_origins, private_sync_fns.as_ref()).await;
+        }
+
+        // ── Public bucket + SG database ───────────────────────────────────────
+        db::ensure_bucket(&cb.cluster, &public_bucket, 256).await;
+        db::ensure_collection(&cb.cluster, &public_bucket, "_default", "articles").await;
+        db::ensure_collection(&cb.cluster, &public_bucket, "_default", "templates").await;
+        db::ensure_collection(&cb.cluster, &public_bucket, "_default", "shared_knowledge").await;
+        db::ensure_collection(&cb.cluster, &public_bucket, "_default", "chunks").await;
+
+        if let Some(pub_db) = &sg_public_db {
+            println!("SG public-db: {admin_url}/{pub_db} | sync: {}", sg_public_sync_url.as_deref().unwrap_or("(not set)"));
+            ensure_sg_public_database(&http, admin_url, pub_db, &public_bucket, sg_admin_auth.as_deref(), &cors_origins, public_sync_fns.as_ref()).await;
+        }
     }
 
     let sg_admin_auth_header = sg_admin_auth
         .as_deref()
         .map(|a| format!("Basic {}", base64_encode(a)));
 
-    let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+    let openai_api_key  = std::env::var("OPENAI_API_KEY").ok();
     let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
 
     let state = AppState {
@@ -109,11 +171,16 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         sg_admin_url,
         sg_db,
+        sg_public_db,
         sg_sync_url,
+        sg_public_sync_url,
         sg_admin_auth: sg_admin_auth_header,
         http,
         openai_api_key,
         openai_base_url,
+        private_bucket,
+        cb_search_url,
+        cb_credentials,
     };
 
     let cors = CorsLayer::new()
@@ -138,143 +205,257 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ensure the Sync Gateway database exists with the correct config.
-/// Creates the database if missing; updates the config if it already exists,
-/// then triggers a resync so existing documents are routed to the right channels.
-async fn ensure_sg_database(
+// ── SG database helpers ───────────────────────────────────────────────────────
+
+fn sg_db_exists_check(status: u16) -> Option<bool> {
+    if (200..300).contains(&status) { return Some(true); }
+    if status == 403 || status == 404 { return Some(false); }
+    None
+}
+
+async fn sg_put_db(http: &reqwest::Client, url: &str, body: &serde_json::Value, auth: Option<&str>) -> bool {
+    let mut req = http.put(url).json(body);
+    if let Some(a) = auth { req = req.header("Authorization", format!("Basic {}", base64_encode(a))); }
+    match req.send().await {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 412 || r.status().as_u16() == 409 => true,
+        Ok(r) => { eprintln!("SG PUT {url} failed ({}): {}", r.status(), r.text().await.unwrap_or_default()); false }
+        Err(e) => { eprintln!("SG PUT {url} error: {e}"); false }
+    }
+}
+
+async fn sg_update_cors_and_sync_fns(
     http: &reqwest::Client,
     admin_url: &str,
     db_name: &str,
-    bucket: Option<&str>,
+    cors_config: &serde_json::Value,
+    coll_sync_pairs: &[(&str, &str)],
     admin_auth: Option<&str>,
-    cors_origins: &[String],
 ) {
-    // SG requires a trailing slash on the database URL; without it SG returns 301
-    // and reqwest won't re-issue a PUT after a redirect.
-    let db_url = format!("{}/{}/", admin_url, db_name);
-
-    let mut get_req = http.get(&db_url);
-    if let Some(auth) = admin_auth {
-        get_req = get_req.header("Authorization", format!("Basic {}", base64_encode(auth)));
+    let config_url = format!("{admin_url}/{db_name}/_config");
+    let cors_body = serde_json::json!({ "cors": cors_config });
+    let mut req = http.put(&config_url).json(&cors_body);
+    if let Some(a) = admin_auth { req = req.header("Authorization", format!("Basic {}", base64_encode(a))); }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => println!("SG CORS updated for '{db_name}'."),
+        Ok(r) => eprintln!("SG CORS update failed ({}): {}", r.status(), r.text().await.unwrap_or_default()),
+        Err(e) => eprintln!("SG CORS update error: {e}"),
     }
 
+    for (coll, sfn) in coll_sync_pairs {
+        let url = format!("{admin_url}/{db_name}/_config/scopes/_default/collections/{coll}");
+        let body = serde_json::json!({ "sync": sfn });
+        let mut req = http.put(&url).json(&body);
+        if let Some(a) = admin_auth { req = req.header("Authorization", format!("Basic {}", base64_encode(a))); }
+        match req.send().await {
+            Ok(r) if r.status().is_success() => println!("SG sync fn updated for '{db_name}'/_default/{coll}."),
+            Ok(r) => eprintln!("SG sync fn update failed for {coll} ({}): {}", r.status(), r.text().await.unwrap_or_default()),
+            Err(e) => eprintln!("SG sync fn update error for {coll}: {e}"),
+        }
+    }
+}
+
+/// Ensure the private SG database exists (per-user channel routing).
+///
+/// `external_fns`: optional map loaded from `SG_PRIVATE_SYNC_FN`. When a
+/// collection key is present its value overrides the built-in default.
+async fn ensure_sg_private_database(
+    http: &reqwest::Client,
+    admin_url: &str,
+    db_name: &str,
+    bucket_name: &str,
+    admin_auth: Option<&str>,
+    cors_origins: &[String],
+    external_fns: Option<&SyncFunctions>,
+) {
+    let db_url = format!("{admin_url}/{db_name}/");
+    let mut get_req = http.get(&db_url);
+    if let Some(a) = admin_auth { get_req = get_req.header("Authorization", format!("Basic {}", base64_encode(a))); }
+
     let db_exists = match get_req.send().await {
-        Err(e) => { eprintln!("SG unreachable, skipping database check: {e}"); return; }
-        Ok(r) if r.status().is_success() => true,
-        // SG returns 403 for non-existent databases; treat as "not found".
-        Ok(r) if r.status().as_u16() == 403 || r.status().as_u16() == 404 => false,
-        Ok(r) => { eprintln!("SG check: unexpected status {}", r.status()); return; }
+        Err(e) => { eprintln!("SG unreachable, skipping private-db check: {e}"); return; }
+        Ok(r) => match sg_db_exists_check(r.status().as_u16()) {
+            Some(v) => v,
+            None => { eprintln!("SG private-db check: unexpected status {}", r.status()); return; }
+        }
     };
 
-    let bucket_name = bucket.unwrap_or(db_name);
-    // Named collections require per-collection sync functions in SG 3.x.
-    // notes/conversations: routed to "user.<owner>" so users only see their own docs.
-    let user_sync_fn = "function(doc,oldDoc){var o=doc.owner||(oldDoc&&oldDoc.owner);if(!o)throw({forbidden:'missing owner'});requireUser(o);channel('user.'+o);}";
-    // tasks: routed to "board.<boardId>"; board docs also fan out to each member's personal channel.
+    // ── Default sync functions ────────────────────────────────────────────────
+    // local_only guard: reject push of documents flagged as device-only.
+    let user_sync_fn = "function(doc,oldDoc){\
+        if(doc.local_only===true)throw({forbidden:'local_only document'});\
+        var o=doc.owner||(oldDoc&&oldDoc.owner);\
+        if(!o)throw({forbidden:'missing owner'});\
+        requireUser(o);channel('user.'+o);\
+    }";
     let tasks_sync_fn = "function(doc,oldDoc){\
+        if(doc.local_only===true)throw({forbidden:'local_only document'});\
         var bid=doc.board_id||(oldDoc&&oldDoc.board_id);\
         if(!bid)throw({forbidden:'missing board_id'});\
         channel('board.'+bid);\
-        if(doc.type==='board'){\
-            var members=doc.members||[];\
-            for(var i=0;i<members.length;i++){channel('user.'+members[i]);}\
-        }\
+        if(doc.type==='board'){var members=doc.members||[];for(var i=0;i<members.length;i++){channel('user.'+members[i]);}}\
+    }";
+    let chunks_sync_fn = "function(doc,oldDoc){\
+        if(doc.local_only===true)throw({forbidden:'local_only document'});\
+        var o=doc.source_owner||(oldDoc&&oldDoc.source_owner);\
+        if(!o)throw({forbidden:'missing source_owner'});\
+        requireUser(o);channel('user.'+o);\
     }";
 
-    // SG docs: wildcards don't work for authenticated connections; use explicit origins.
-    // Both "origin" and "login_origin" are required for browser BLIP over WebSocket.
+    // Helper: resolve a sync function — external file overrides default.
+    let resolve = |coll: &str, default: &str| -> String {
+        external_fns
+            .and_then(|fns| fns.get("_default"))
+            .and_then(|colls| colls.get(coll))
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    };
+
     let cors_config = serde_json::json!({
-        "origin": cors_origins,
-        "login_origin": cors_origins,
-        "headers": ["Authorization"]
+        "origin": cors_origins, "login_origin": cors_origins, "headers": ["Authorization"]
     });
 
-    // actions: routed to "user.<owner>" so each user only sees their own action items.
-    let actions_sync_fn = "function(doc,oldDoc){var o=doc.owner||(oldDoc&&oldDoc.owner);if(!o)throw({forbidden:'missing owner'});requireUser(o);channel('user.'+o);}";
+    let default_fn   = resolve("_default",      user_sync_fn);
+    let notes_fn     = resolve("notes",         user_sync_fn);
+    let convs_fn     = resolve("conversations", user_sync_fn);
+    let tasks_fn     = resolve("tasks",         tasks_sync_fn);
+    let actions_fn   = resolve("actions",       user_sync_fn);
+    let chunks_fn    = resolve("chunks",        chunks_sync_fn);
 
-    let scopes_config = serde_json::json!({
-        "_default": {
-            "collections": {
-                "_default":      { "sync": user_sync_fn },
-                "notes":         { "sync": user_sync_fn },
-                "conversations": { "sync": user_sync_fn },
-                "tasks":         { "sync": tasks_sync_fn },
-                "actions":       { "sync": actions_sync_fn }
-            }
-        }
-    });
-
-    // Full body used only when creating a brand-new database.
-    let create_body = serde_json::json!({
-        "bucket": bucket_name,
-        "num_index_replicas": 0,
-        "cors": cors_config,
-        "scopes": scopes_config,
-        "import_docs": true,
-        "enable_shared_bucket_access": true
-    });
+    let coll_sync_pairs: Vec<(&str, String)> = vec![
+        ("_default",      default_fn.clone()),
+        ("notes",         notes_fn.clone()),
+        ("conversations", convs_fn.clone()),
+        ("tasks",         tasks_fn.clone()),
+        ("actions",       actions_fn.clone()),
+        ("chunks",        chunks_fn.clone()),
+    ];
+    // Convert to &str pairs for the helper
+    let coll_sync_refs: Vec<(&str, &str)> = coll_sync_pairs.iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect();
 
     if db_exists {
-        let config_url = format!("{}/{}/_config", admin_url, db_name);
-
-        // CORS: PUT /{db}/_config with only the cors key (no scopes — scopes are
-        // immutable after creation and must not appear in update requests).
-        if !cors_origins.is_empty() {
-            let cors_body = serde_json::json!({ "cors": cors_config });
-            let mut req = http.put(&config_url).json(&cors_body);
-            if let Some(auth) = admin_auth {
-                req = req.header("Authorization", format!("Basic {}", base64_encode(auth)));
-            }
-            match req.send().await {
-                Ok(r) if r.status().is_success() =>
-                    println!("SG CORS config updated for '{db_name}'."),
-                Ok(r) => eprintln!("SG CORS update failed ({}): {}", r.status(), r.text().await.unwrap_or_default()),
-                Err(e) => eprintln!("SG CORS update request failed: {e}"),
-            }
-        }
-
-        // Sync functions: SG 3.x forbids changing scopes via PUT /{db}/_config
-        // after creation. Use per-collection endpoints instead.
-        let coll_sync_pairs: &[(&str, &str)] = &[
-            ("_default",      user_sync_fn),
-            ("notes",         user_sync_fn),
-            ("conversations", user_sync_fn),
-            ("tasks",         tasks_sync_fn),
-            ("actions",       actions_sync_fn),
-        ];
-        for (coll, sfn) in coll_sync_pairs {
-            let coll_url = format!(
-                "{}/{}/_config/scopes/_default/collections/{}",
-                admin_url, db_name, coll
-            );
-            let body = serde_json::json!({ "sync": sfn });
-            let mut req = http.put(&coll_url).json(&body);
-            if let Some(auth) = admin_auth {
-                req = req.header("Authorization", format!("Basic {}", base64_encode(auth)));
-            }
-            match req.send().await {
-                Ok(r) if r.status().is_success() =>
-                    println!("SG sync function updated for '{db_name}'/_default/{coll}."),
-                Ok(r) => eprintln!("SG sync fn update failed for {coll} ({}): {}", r.status(), r.text().await.unwrap_or_default()),
-                Err(e) => eprintln!("SG sync fn update request failed for {coll}: {e}"),
-            }
-        }
+        sg_update_cors_and_sync_fns(http, admin_url, db_name, &cors_config, &coll_sync_refs, admin_auth).await;
     } else {
-        // Create the database.
-        let mut put_req = http.put(&db_url).json(&create_body);
-        if let Some(auth) = admin_auth {
-            put_req = put_req.header("Authorization", format!("Basic {}", base64_encode(auth)));
+        let scopes_config = serde_json::json!({
+            "_default": { "collections": {
+                "_default":      { "sync": default_fn },
+                "notes":         { "sync": notes_fn },
+                "conversations": { "sync": convs_fn },
+                "tasks":         { "sync": tasks_fn },
+                "actions":       { "sync": actions_fn },
+                "chunks":        { "sync": chunks_fn },
+            }}
+        });
+        let body = serde_json::json!({
+            "bucket": bucket_name, "num_index_replicas": 0,
+            "cors": cors_config, "scopes": scopes_config,
+            "import_docs": true, "enable_shared_bucket_access": true
+        });
+        if sg_put_db(http, &db_url, &body, admin_auth).await {
+            println!("SG private-db '{db_name}' created (bucket: '{bucket_name}').");
         }
-        match put_req.send().await {
-            Ok(r) if r.status().is_success() || r.status().as_u16() == 412 || r.status().as_u16() == 409 => {
-                println!("SG database '{db_name}' created (bucket: '{bucket_name}').");
-            }
-            Ok(r) => {
-                let s = r.status();
-                eprintln!("SG database creation failed ({s}): {}", r.text().await.unwrap_or_default());
-            }
-            Err(e) => eprintln!("SG database creation request failed: {e}"),
+    }
+}
+
+/// Ensure the public SG database exists (role-based read, admin write only).
+///
+/// `external_fns`: optional map loaded from `SG_PUBLIC_SYNC_FN`. When a
+/// collection key is present its value overrides the built-in default.
+async fn ensure_sg_public_database(
+    http: &reqwest::Client,
+    admin_url: &str,
+    db_name: &str,
+    bucket_name: &str,
+    admin_auth: Option<&str>,
+    cors_origins: &[String],
+    external_fns: Option<&SyncFunctions>,
+) {
+    let db_url = format!("{admin_url}/{db_name}/");
+    let mut get_req = http.get(&db_url);
+    if let Some(a) = admin_auth { get_req = get_req.header("Authorization", format!("Basic {}", base64_encode(a))); }
+
+    let db_exists = match get_req.send().await {
+        Err(e) => { eprintln!("SG unreachable, skipping public-db check: {e}"); return; }
+        Ok(r) => match sg_db_exists_check(r.status().as_u16()) {
+            Some(v) => v,
+            None => { eprintln!("SG public-db check: unexpected status {}", r.status()); return; }
         }
+    };
+
+    // Default: all public docs go to the "public" channel; read-only for authenticated users.
+    let public_read_sync_fn = "function(doc,oldDoc){channel('public');}";
+
+    // Helper: resolve a sync function — external file overrides default.
+    let resolve = |coll: &str, default: &str| -> String {
+        external_fns
+            .and_then(|fns| fns.get("_default"))
+            .and_then(|colls| colls.get(coll))
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    };
+
+    let articles_fn        = resolve("articles",         public_read_sync_fn);
+    let templates_fn       = resolve("templates",        public_read_sync_fn);
+    let shared_fn          = resolve("shared_knowledge", public_read_sync_fn);
+    let chunks_fn          = resolve("chunks",           public_read_sync_fn);
+
+    let cors_config = serde_json::json!({
+        "origin": cors_origins, "login_origin": cors_origins, "headers": ["Authorization"]
+    });
+
+    let coll_sync_pairs: Vec<(&str, String)> = vec![
+        ("articles",         articles_fn.clone()),
+        ("templates",        templates_fn.clone()),
+        ("shared_knowledge", shared_fn.clone()),
+        ("chunks",           chunks_fn.clone()),
+    ];
+    let coll_sync_refs: Vec<(&str, &str)> = coll_sync_pairs.iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect();
+
+    if db_exists {
+        sg_update_cors_and_sync_fns(http, admin_url, db_name, &cors_config, &coll_sync_refs, admin_auth).await;
+    } else {
+        let scopes_config = serde_json::json!({
+            "_default": { "collections": {
+                "articles":         { "sync": articles_fn },
+                "templates":        { "sync": templates_fn },
+                "shared_knowledge": { "sync": shared_fn },
+                "chunks":           { "sync": chunks_fn },
+            }}
+        });
+        let body = serde_json::json!({
+            "bucket": bucket_name, "num_index_replicas": 0,
+            "cors": cors_config, "scopes": scopes_config,
+            "import_docs": true, "enable_shared_bucket_access": true,
+            "guest_enabled": false
+        });
+        if sg_put_db(http, &db_url, &body, admin_auth).await {
+            println!("SG public-db '{db_name}' created (bucket: '{bucket_name}').");
+            ensure_sg_role(http, admin_url, db_name, "public-reader", &["public"], admin_auth).await;
+        }
+    }
+}
+
+/// Ensure a named SG role exists with the given admin channels.
+async fn ensure_sg_role(
+    http: &reqwest::Client,
+    admin_url: &str,
+    db_name: &str,
+    role_name: &str,
+    channels: &[&str],
+    admin_auth: Option<&str>,
+) {
+    let url = format!("{admin_url}/{db_name}/_role/{role_name}");
+    let body = serde_json::json!({ "name": role_name, "admin_channels": channels });
+    let mut req = http.put(&url).json(&body);
+    if let Some(a) = admin_auth { req = req.header("Authorization", format!("Basic {}", base64_encode(a))); }
+    match req.send().await {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 200 || r.status().as_u16() == 201 =>
+            println!("SG role '{role_name}' ensured in '{db_name}'."),
+        Ok(r) => eprintln!("SG role '{role_name}' upsert failed ({}): {}", r.status(), r.text().await.unwrap_or_default()),
+        Err(e) => eprintln!("SG role '{role_name}' request failed: {e}"),
     }
 }
 

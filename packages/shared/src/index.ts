@@ -6,3 +6,6 @@ export * from "./note-encryption.js";
 export * from "./auth-helpers.js";
 export * from "./storage.js";
 export * from "./ai.js";
+export * from "./chunker.js";
+export * from "./rag.js";
+export * from "./local-embedder.js";

@@ -225,3 +225,111 @@ pub async fn ensure_collection(
         }
     }
 }
+
+/// Ensure a per-user private scope exists in the private bucket with all required collections.
+///
+/// Creates the CB scope named after the username and the five standard collections
+/// (`notes`, `conversations`, `tasks`, `actions`, `chunks`) inside it.
+pub async fn ensure_private_scope(cluster: &Cluster, private_bucket: &str, username: &str) {
+    let collections = ["notes", "conversations", "tasks", "actions", "chunks"];
+    for coll in &collections {
+        ensure_collection(cluster, private_bucket, username, coll).await;
+    }
+}
+
+/// Ensure a Couchbase vector search index exists on the server_embedding field
+/// of the user's chunks collection in the private bucket.
+///
+/// Uses the REST management API since the Rust SDK does not yet expose vector
+/// index management. Non-fatal — logs errors but does not abort startup.
+pub async fn ensure_vector_index(
+    http: &reqwest::Client,
+    cb_mgmt_url: &str,
+    cb_auth: &str,
+    private_bucket: &str,
+    username: &str,
+) {
+    let index_name = format!("idx_chunks_server_embedding_{}", username.replace(|c: char| !c.is_alphanumeric(), "_"));
+    let url = format!("{cb_mgmt_url}/api/bucket/{private_bucket}/scope/{username}/index/{index_name}");
+
+    // Check if index already exists
+    let check = http.get(&url)
+        .header("Authorization", format!("Basic {}", base64_encode(cb_auth)))
+        .send().await;
+    if let Ok(r) = check {
+        if r.status().is_success() {
+            println!("Vector index '{index_name}' already exists.");
+            return;
+        }
+    }
+
+    // serde_json::json! does not support dynamic keys — build the types map separately.
+    let scope_collection_key = format!("{username}.chunks");
+    let type_mapping = serde_json::json!({
+        "dynamic": false,
+        "enabled": true,
+        "properties": {
+            "server_embedding": {
+                "dynamic": false,
+                "enabled": true,
+                "fields": [{
+                    "dims": 3072,
+                    "index": true,
+                    "name": "server_embedding",
+                    "similarity": "dot_product",
+                    "type": "vector",
+                    "vector_index_optimized_for": "recall"
+                }]
+            }
+        }
+    });
+    let mut types_map = serde_json::Map::new();
+    types_map.insert(scope_collection_key, type_mapping);
+
+    let body = serde_json::json!({
+        "type": "fulltext-index",
+        "name": index_name,
+        "sourceType": "gocbcore",
+        "sourceName": private_bucket,
+        "params": {
+            "doc_config": {
+                "docid_prefix_delim": "",
+                "docid_regexp": "",
+                "mode": "scope.collection.type_field",
+                "type_field": "type"
+            },
+            "mapping": {
+                "default_analyzer": "standard",
+                "default_datetime_parser": "dateTimeOptional",
+                "default_field": "_all",
+                "default_mapping": { "dynamic": false, "enabled": false },
+                "default_type": "_default",
+                "docvalues_dynamic": false,
+                "index_dynamic": false,
+                "store_dynamic": false,
+                "type_field": "_type",
+                "types": serde_json::Value::Object(types_map)
+            },
+            "store": { "indexType": "scorch", "segmentVersion": 16 }
+        },
+        "sourceParams": {}
+    });
+
+    match http.put(&url)
+        .header("Authorization", format!("Basic {}", base64_encode(cb_auth)))
+        .json(&body)
+        .send().await
+    {
+        Ok(r) if r.status().is_success() =>
+            println!("Vector index '{index_name}' created for user '{username}'."),
+        Ok(r) => eprintln!(
+            "Vector index creation failed for '{username}' ({}): {}",
+            r.status(), r.text().await.unwrap_or_default()
+        ),
+        Err(e) => eprintln!("Vector index request failed for '{username}': {e}"),
+    }
+}
+
+fn base64_encode(s: &str) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s.as_bytes())
+}

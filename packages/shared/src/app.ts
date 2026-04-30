@@ -39,13 +39,17 @@ import {
   loadColumns, saveColumnDoc, deleteColumnDoc,
   loadTasks, saveTaskDoc, deleteTaskDoc,
   loadActionItems, saveActionItem, updateActionStatus,
+  saveChunkDoc, ensureVectorIndex,
 } from "./storage.js";
+import { chunkText } from "./chunker.js";
+import { initLocalEmbedder, getLocalEmbedder } from "./local-embedder.js";
+import type { ChunkDoc } from "./types.js";
 import { generateSalt } from "./crypto.js";
 import {
   serverLogin, serverRegister, searchUsers,
   fetchSyncConfig as fetchSyncConfigFromServer,
 } from "./server.js";
-import type { SyncConfigFromServer } from "./server.js";
+import type { SyncConfigFromServer, SyncConfigsFromServer } from "./server.js";
 import { resolveSyncUrl, userDbName } from "./auth-helpers.js";
 import { parseContent, extractPlainText, resolveBlobRefs, stripDataUris } from "./editor-helpers.js";
 import { getAIReply as getAIReplyShared } from "./ai.js";
@@ -174,7 +178,7 @@ function setupComponents(): void {
   if (actionDrawerEl) {
     actionDrawerEl.getAIReply = async (prompt: string) => {
       const history = [{ role: "user" as const, content: prompt, timestamp: new Date().toISOString() }];
-      return getAIReplyShared(history, currentUser, authSession, (digest: string) => _adapter.getBlobData(digest));
+      return getAIReplyShared(history, currentUser, authSession, (digest: string) => _adapter.getBlobData(digest), _adapter);
     };
     actionDrawerEl.addEventListener("cbl-action-save", (e) =>
       handleActionSave((e as CustomEvent<ActionSaveDetail>).detail).catch(console.error)
@@ -283,11 +287,61 @@ async function saveNote(note: Note): Promise<void> {
   const updated = await saveNoteDoc(_adapter, note, currentUser!, encryptionPassword);
   const idx = notes.findIndex((n) => n.id === note.id);
   if (idx >= 0) notes[idx] = updated;
+
+  // Background embedding — skip encrypted docs (no vectors for app-level encrypted content)
+  if (currentUser?.encryption_mode !== "app-level" && updated.content_text) {
+    embedDocumentInBackground(updated.id, "notes", updated.content_text, currentUser!.username)
+      .catch((e) => console.warn("[embed] background embedding failed:", e));
+  }
 }
 
 async function deleteNote(id: string): Promise<void> {
   await deleteNoteDoc(_adapter, id, currentUser!.username);
   notes = notes.filter((n) => n.id !== id);
+}
+
+/**
+ * Chunk a document's text, embed each chunk locally, and persist the chunk
+ * docs to the `chunks` collection. Runs in the background after save.
+ * Skips silently if the local embedder is not yet initialised.
+ */
+async function embedDocumentInBackground(
+  sourceId: string,
+  sourceCollection: string,
+  text: string,
+  owner: string
+): Promise<void> {
+  const embedder = getLocalEmbedder();
+  if (!embedder) return;
+
+  // Use default chunk size / overlap (512 / 64 tokens)
+  const chunks = chunkText(text);
+  if (chunks.length === 0) return;
+
+  const now = new Date().toISOString();
+  for (let i = 0; i < chunks.length; i++) {
+    let embedding: number[];
+    try {
+      embedding = await embedder.embed(chunks[i]);
+    } catch (err) {
+      console.warn(`[embed] Failed to embed chunk ${i} of '${sourceId}':`, err);
+      continue;
+    }
+    const chunk: ChunkDoc = {
+      id: `chunk::${sourceId}::${i}`,
+      type: "chunk",
+      source_id: sourceId,
+      source_collection: sourceCollection,
+      source_owner: owner,
+      chunk_index: i,
+      text: chunks[i],
+      local_embedding: embedding,
+      created_at: now,
+      updated_at: now,
+    };
+    // local_only: true ensures the push filter excludes these from SG replication
+    await saveChunkDoc(_adapter, { ...chunk, local_only: true });
+  }
 }
 
 async function searchNotes(q: string): Promise<void> {
@@ -388,7 +442,7 @@ async function sendMessage(): Promise<void> {
   let replyContent: string;
   try {
     const history = conv.messages.filter((m) => m.role === "user" || m.role === "assistant");
-    replyContent = await getAIReplyShared(history, currentUser, authSession, (digest: string) => _adapter.getBlobData(digest));
+    replyContent = await getAIReplyShared(history, currentUser, authSession, (digest: string) => _adapter.getBlobData(digest), _adapter);
   } catch (err) {
     replyContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -994,11 +1048,12 @@ function showLoginError(form: "signin" | "create", msg: string): void {
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
 function buildAuthSession(
-  result: { token: string; sync_config: SyncConfigFromServer },
+  result: { token: string; sync_config: SyncConfigFromServer; sync_configs?: SyncConfigsFromServer },
   url: string,
   username: string,
   password: string
 ): AuthSession {
+  const pub = result.sync_configs?.public;
   return {
     token: result.token,
     server_url: url,
@@ -1006,6 +1061,10 @@ function buildAuthSession(
     ...(_hooks.includePasswordInSession ? { password } : {}),
     gateway_session_id: result.sync_config.gateway_session_id,
     gateway_cookie_name: result.sync_config.gateway_cookie_name,
+    ...(pub?.sync_url ? {
+      public_sync_url: resolveSyncUrl(pub.sync_url, url),
+      public_sync_collection: pub.sync_collection ?? "_default.articles",
+    } : {}),
   };
 }
 
@@ -1058,8 +1117,19 @@ async function handleLogin(
 
   await _adapter.closeDatabase();
   const encPassword = _hooks.getDbEncPassword(profile, password);
-  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions"]);
+  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions", "chunks"]);
   if (profile.encryption_mode !== "none") encryptionPassword = password;
+
+  // Ensure CBLite vector index on chunks.local_embedding (non-fatal)
+  ensureVectorIndex(_adapter).catch((e) => console.warn("[init] ensureVectorIndex failed:", e));
+
+  // Initialise the local embedding worker (lazy — model loads on first embed)
+  try {
+    const workerUrl = new URL("./embedding-worker.ts", import.meta.url);
+    initLocalEmbedder(workerUrl);
+  } catch (e) {
+    console.warn("[init] LocalEmbedder init failed (non-fatal):", e);
+  }
 
   const userSyncConfig = await loadSyncConfigDB(_adapter);
   const userServers = await loadSavedServersDB(_adapter);
@@ -1136,8 +1206,19 @@ async function handleCreateAccount(
 
   await _adapter.closeDatabase();
   const encPassword = _hooks.getDbEncPassword(profile, password);
-  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions"]);
+  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions", "chunks"]);
   if (encMode !== "none") encryptionPassword = password;
+
+  // Ensure CBLite vector index on chunks.local_embedding (non-fatal)
+  ensureVectorIndex(_adapter).catch((e) => console.warn("[init] ensureVectorIndex failed:", e));
+
+  // Initialise the local embedding worker
+  try {
+    const workerUrl = new URL("./embedding-worker.ts", import.meta.url);
+    initLocalEmbedder(workerUrl);
+  } catch (e) {
+    console.warn("[init] LocalEmbedder init failed (non-fatal):", e);
+  }
 
   await persistSavedServersDB(_adapter, savedServers);
   await persistSyncConfigDB(_adapter, syncConfig);
@@ -1145,6 +1226,37 @@ async function handleCreateAccount(
   currentUser = profile;
   hideLoginScreen();
   await continueInit();
+}
+
+/**
+ * Start the private (push+pull) replicator and, if a public sync URL is
+ * available, also start a pull-only replicator for the public database.
+ *
+ * The push filter on the private replicator excludes local_only documents
+ * so they never leave the device.
+ */
+async function startAllReplicators(): Promise<void> {
+  const auth = _hooks.getSyncAuth();
+  const fe = _hooks.getSyncFieldEncryption();
+
+  // Private DB — push+pull with local_only push filter applied by the platform hook
+  await _adapter.startReplication(
+    syncConfig.url,
+    syncConfig.collection,
+    syncConfig.direction,
+    auth,
+    fe
+  );
+
+  // Public DB — pull only, no push filter needed
+  if (authSession?.public_sync_url) {
+    _adapter.startReplication(
+      authSession.public_sync_url,
+      authSession.public_sync_collection ?? "_default.articles",
+      "pull",
+      auth
+    ).catch((e: unknown) => console.warn("[public-replicator] start failed (non-fatal):", e));
+  }
 }
 
 async function handleLogout(): Promise<void> {
@@ -1284,10 +1396,7 @@ async function continueInit(): Promise<void> {
 
   if (syncConfig.continuous_sync && syncConfig.url) {
     setStatus("Connecting");
-    const auth = _hooks.getSyncAuth();
-    const fe = _hooks.getSyncFieldEncryption();
-    _adapter.startReplication(syncConfig.url, syncConfig.collection, syncConfig.direction, auth, fe)
-      .catch((e: unknown) => { setStatus("Stopped"); console.warn("auto-start replication:", e); });
+    startAllReplicators().catch((e: unknown) => { setStatus("Stopped"); console.warn("auto-start replication:", e); });
   }
 }
 
@@ -1490,13 +1599,10 @@ function wireAppButtons(): void {
       return;
     }
     setStatus("Connecting");
-    const auth = _hooks.getSyncAuth();
-    const fieldEncryption = _hooks.getSyncFieldEncryption();
-    _adapter.startReplication(syncConfig.url, syncConfig.collection, syncConfig.direction, auth, fieldEncryption)
-      .catch((e: unknown) => {
-        setStatus("Stopped");
-        console.warn("startReplication failed:", e);
-      });
+    startAllReplicators().catch((e: unknown) => {
+      setStatus("Stopped");
+      console.warn("startReplication failed:", e);
+    });
   });
 
   document.getElementById("btn-stop-sync")!.addEventListener("click", async () => {
@@ -1510,10 +1616,7 @@ function wireAppButtons(): void {
     await persistSyncConfigDB(_adapter, syncConfig);
     if (checked && syncConfig.url) {
       setStatus("Connecting");
-      const auth = _hooks.getSyncAuth();
-      const fe = _hooks.getSyncFieldEncryption();
-      _adapter.startReplication(syncConfig.url, syncConfig.collection, syncConfig.direction, auth, fe)
-        .catch((e: unknown) => { setStatus("Stopped"); console.warn("startReplication failed:", e); });
+      startAllReplicators().catch((e: unknown) => { setStatus("Stopped"); console.warn("startReplication failed:", e); });
     } else {
       await _adapter.stopReplication();
       setStatus("Stopped");

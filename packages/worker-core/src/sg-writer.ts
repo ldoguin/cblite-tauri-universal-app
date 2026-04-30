@@ -20,51 +20,71 @@ export class SgWriter {
     });
   }
 
-  /** Write all action drafts derived from one event. Returns count written. */
+  /**
+   * Build ActionItemDoc objects from drafts without writing them.
+   * Gives the caller stable IDs so chunk docs can be written first.
+   */
+  buildActionDocs(
+    drafts: ActionItemDraft[],
+    event: SourceEvent,
+    username: string
+  ): ActionItemDoc[] {
+    const now = new Date().toISOString();
+    const today = now.slice(0, 10);
+    return drafts.map((draft) => ({
+      id: `action-${randomUUID()}`,
+      type: "action_item" as const,
+      action_type: draft.action_type,
+      title: draft.title,
+      body: draft.body,
+      raw_payload: {
+        ...draft.raw_payload,
+        source_event: {
+          id: event.id,
+          source: event.source,
+          type: event.type,
+          actor: event.actor,
+          url: event.url,
+          received_at: event.receivedAt,
+        },
+      },
+      status: "pending" as const,
+      owner: username,
+      feedback: null,
+      feedback_at: null,
+      webhook_url: null,
+      scheduled_date: today,
+      created_at: now,
+      updated_at: now,
+      sync_mode: "synced" as const,
+      local_only: false,
+      vectorize: draft.vectorize ?? false,
+    }));
+  }
+
+  /** Write pre-built ActionItemDocs to SG. Returns count written. */
+  async writeActionDocs(docs: ActionItemDoc[], username: string): Promise<number> {
+    if (docs.length === 0) return 0;
+    const token = await this.getSessionToken(username);
+    let written = 0;
+    for (const doc of docs) {
+      const ok = await this.putDocument(doc, token, username);
+      if (ok) written++;
+    }
+    return written;
+  }
+
+  /** Write all action drafts derived from one event. Returns count written.
+   *  Convenience wrapper — use buildActionDocs + writeActionDocs when you need
+   *  to write chunk docs between the two steps.
+   */
   async writeActions(
     drafts: ActionItemDraft[],
     event: SourceEvent,
     username: string
   ): Promise<number> {
-    if (drafts.length === 0) return 0;
-
-    const token = await this.getSessionToken(username);
-    const now = new Date().toISOString();
-    const today = now.slice(0, 10);
-
-    let written = 0;
-    for (const draft of drafts) {
-      const doc: ActionItemDoc = {
-        id: `action-${randomUUID()}`,
-        type: "action_item",
-        action_type: draft.action_type,
-        title: draft.title,
-        body: draft.body,
-        raw_payload: {
-          ...draft.raw_payload,
-          source_event: {
-            id: event.id,
-            source: event.source,
-            type: event.type,
-            actor: event.actor,
-            url: event.url,
-            received_at: event.receivedAt,
-          },
-        },
-        status: "pending",
-        owner: username,
-        feedback: null,
-        feedback_at: null,
-        webhook_url: null,
-        scheduled_date: today,
-        created_at: now,
-        updated_at: now,
-      };
-
-      const ok = await this.putDocument(doc, token, username);
-      if (ok) written++;
-    }
-    return written;
+    const docs = this.buildActionDocs(drafts, event, username);
+    return this.writeActionDocs(docs, username);
   }
 
   private async putDocument(doc: ActionItemDoc, token: string, username: string): Promise<boolean> {

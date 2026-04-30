@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::{create_jwt, validate_jwt, verify_password},
     error::AppError,
-    models::{User, UserSyncConfig},
+    models::{User, UserSyncConfig, SyncEntry, SyncConfigs},
     routes::boards::grant_board_channel,
     AppState,
 };
@@ -19,6 +19,7 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// Legacy single-db sync config (kept for backwards compatibility).
 #[derive(Serialize)]
 pub struct SyncConfigResponse {
     pub sync_url: String,
@@ -33,7 +34,10 @@ pub struct SyncConfigResponse {
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub token: String,
+    /// Legacy single-db config (private db) — kept for existing clients.
     pub sync_config: SyncConfigResponse,
+    /// Dual-db config — new clients should use this.
+    pub sync_configs: SyncConfigs,
 }
 
 pub async fn login(
@@ -61,23 +65,39 @@ pub async fn login(
     let (gateway_session_id, gateway_cookie_name) =
         create_sg_session(&state, &user.username, &body.password).await;
 
-    let sync_config = cfg
-        .map(|c| SyncConfigResponse {
-            sync_url: c.sync_url,
-            sync_collection: c.sync_collection,
-            sync_direction: c.sync_direction,
+    let private_sync_url = cfg.as_ref()
+        .map(|c| c.sync_url.clone())
+        .unwrap_or_else(|| state.sg_sync_url.clone().unwrap_or_default());
+    let private_collection = cfg.as_ref()
+        .map(|c| c.sync_collection.clone())
+        .unwrap_or_else(|| "_default.notes".into());
+
+    let sync_config = SyncConfigResponse {
+        sync_url: private_sync_url.clone(),
+        sync_collection: private_collection.clone(),
+        sync_direction: "both".into(),
+        gateway_session_id: gateway_session_id.clone(),
+        gateway_cookie_name: gateway_cookie_name.clone(),
+    };
+
+    let sync_configs = SyncConfigs {
+        private: SyncEntry {
+            sync_url: private_sync_url,
+            sync_collection: private_collection,
+            sync_direction: "both".into(),
             gateway_session_id: gateway_session_id.clone(),
             gateway_cookie_name: gateway_cookie_name.clone(),
-        })
-        .unwrap_or_else(|| SyncConfigResponse {
-            sync_url: state.sg_sync_url.clone().unwrap_or_default(),
-            sync_collection: "notes".into(),
-            sync_direction: "both".into(),
-            gateway_session_id,
-            gateway_cookie_name,
-        });
+        },
+        public: SyncEntry {
+            sync_url: state.sg_public_sync_url.clone().unwrap_or_default(),
+            sync_collection: "_default.articles".into(),
+            sync_direction: "pull".into(),
+            gateway_session_id: None,
+            gateway_cookie_name: None,
+        },
+    };
 
-    Ok(Json(LoginResponse { token, sync_config }))
+    Ok(Json(LoginResponse { token, sync_config, sync_configs }))
 }
 
 async fn create_sg_session(
@@ -125,8 +145,6 @@ async fn create_sg_session(
 
 /// Upsert the SG user (PUT is idempotent). Called at login to recover from SG database resets.
 async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &str, password: &str) {
-    // In SG 3.x, top-level admin_channels only applies to _default._default.
-    // Named collections require explicit collection_access entries.
     let user_channel = format!("user.{username}");
     let sg_user = serde_json::json!({
         "password": password,
@@ -137,6 +155,7 @@ async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &
                 "conversations": { "admin_channels": [&user_channel] },
                 "tasks":         { "admin_channels": [&user_channel] },
                 "actions":       { "admin_channels": [&user_channel] },
+                "chunks":        { "admin_channels": [&user_channel] },
             }
         }
     });

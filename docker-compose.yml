@@ -14,8 +14,8 @@ x-worker-base: &worker-base
       condition: service_healthy
   env_file: .env
   environment:
-    SYNC_GATEWAY_URL: http://sync-gateway:4984
-    SYNC_GATEWAY_DB: ${SYNC_GATEWAY_DB:-notes}
+    SYNC_GATEWAY_URL: http://couchbase-sg:4984
+    SYNC_GATEWAY_DB: ${SG_PRIVATE_DB:-private-db}
     STATE_DB_PATH: /data
   volumes:
     - worker_data:/data
@@ -65,11 +65,27 @@ services:
       COUCHBASE_USERNAME: ${COUCHBASE_USERNAME:-Administrator}
       COUCHBASE_PASSWORD: ${COUCHBASE_PASSWORD:-password}
       COUCHBASE_BUCKET: ${COUCHBASE_BUCKET:-auth}
+      # Couchbase Search REST endpoint for vector index management
+      CB_SEARCH_URL: http://couchbase-sg:8094
+      # Private bucket — per-user scopes live here
+      PRIVATE_BUCKET: ${PRIVATE_BUCKET:-private}
+      # Public bucket — shared reference data
+      PUBLIC_BUCKET: ${PUBLIC_BUCKET:-public}
       SYNC_GATEWAY_ADMIN_URL: http://couchbase-sg:4985
-      SYNC_GATEWAY_DB: ${SYNC_GATEWAY_DB:-notes}
-      SYNC_GATEWAY_SYNC_URL: ws://couchbase-sg:4984/${SYNC_GATEWAY_DB:-notes}
-      SYNC_GATEWAY_BUCKET: ${SYNC_GATEWAY_DB:-notes}
+      # Private SG database (per-user channel routing)
+      SG_PRIVATE_DB: ${SG_PRIVATE_DB:-private-db}
+      SYNC_GATEWAY_SYNC_URL: ws://couchbase-sg:4984/${SG_PRIVATE_DB:-private-db}
+      # Public SG database (role-based read)
+      SG_PUBLIC_DB: ${SG_PUBLIC_DB:-public-db}
+      SG_PUBLIC_SYNC_URL: ws://couchbase-sg:4984/${SG_PUBLIC_DB:-public-db}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Optional: paths to external sync function JSON files (see .env.example for format).
+      # Uncomment and mount the files below if you want to customise sync functions
+      # without rebuilding the server image.
+      # SG_PRIVATE_SYNC_FN: /config/sync-fns/private-db.json
+      # SG_PUBLIC_SYNC_FN: /config/sync-fns/public-db.json
+    # volumes:
+    #   - ./config/sync-fns:/config/sync-fns:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
       interval: 10s
