@@ -1,0 +1,226 @@
+name: cblite-app
+
+# ── Shared env file ────────────────────────────────────────────────────────────
+# Copy .env.example to .env and fill in secrets before running.
+# All services inherit the variables they need from this file.
+
+x-worker-base: &worker-base
+  build:
+    context: .
+    dockerfile: worker.Dockerfile
+  restart: unless-stopped
+  depends_on:
+    auth-server:
+      condition: service_healthy
+  env_file: .env
+  environment:
+    SYNC_GATEWAY_URL: http://sync-gateway:4984
+    SYNC_GATEWAY_DB: ${SYNC_GATEWAY_DB:-notes}
+    STATE_DB_PATH: /data
+  volumes:
+    - worker_data:/data
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────────────
+
+  couchbase-sg:
+    # Single image that runs both Couchbase Server and Sync Gateway.
+    # Source: tauri-cblite-example/Dockerfile
+    build:
+      context: ./tauri-cblite-example
+      dockerfile: Dockerfile
+    container_name: couchbase-sg
+    restart: unless-stopped
+    ports:
+      - "8091:8091"   # Couchbase Web UI
+      - "4984:4984"   # SG public API
+      - "4985:4985"   # SG admin API
+    volumes:
+      - couchbase_data:/opt/couchbase/var
+      - sg_logs:/var/log/sync_gateway
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4984"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  # ── Auth server ───────────────────────────────────────────────────────────────
+
+  auth-server:
+    build:
+      context: ./cblite-auth-server
+      dockerfile: Dockerfile
+    container_name: auth-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      couchbase-sg:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      COUCHBASE_URI: couchbase://couchbase-sg
+      COUCHBASE_USERNAME: ${COUCHBASE_USERNAME:-Administrator}
+      COUCHBASE_PASSWORD: ${COUCHBASE_PASSWORD:-password}
+      COUCHBASE_BUCKET: ${COUCHBASE_BUCKET:-auth}
+      SYNC_GATEWAY_ADMIN_URL: http://couchbase-sg:4985
+      SYNC_GATEWAY_DB: ${SYNC_GATEWAY_DB:-notes}
+      SYNC_GATEWAY_SYNC_URL: ws://couchbase-sg:4984/${SYNC_GATEWAY_DB:-notes}
+      SYNC_GATEWAY_BUCKET: ${SYNC_GATEWAY_DB:-notes}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Email workers ─────────────────────────────────────────────────────────────
+
+  email-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: email-worker
+    container_name: email-worker
+    profiles: [email]
+
+  imap-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: imap-worker
+    container_name: imap-worker
+    profiles: [imap]
+
+  outlook-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: outlook-worker
+    container_name: outlook-worker
+    profiles: [outlook]
+
+  # ── Dev-tool workers ──────────────────────────────────────────────────────────
+
+  github-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: github-worker
+    container_name: github-worker
+    profiles: [github]
+
+  gitlab-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: gitlab-worker
+    container_name: gitlab-worker
+    profiles: [gitlab]
+
+  jira-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: jira-worker
+    container_name: jira-worker
+    profiles: [jira]
+
+  # ── Messaging workers ─────────────────────────────────────────────────────────
+
+  slack-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: slack-worker
+    container_name: slack-worker
+    ports:
+      - "${SLACK_WEBHOOK_PORT:-3003}:3003"
+    environment:
+      WEBHOOK_PORT: "3003"
+    profiles: [slack]
+
+  telegram-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: telegram-worker
+    container_name: telegram-worker
+    # Expose only when webhook mode is enabled (TELEGRAM_WEBHOOK_URL set in .env)
+    ports:
+      - "${TELEGRAM_WEBHOOK_PORT:-3005}:3005"
+    environment:
+      WEBHOOK_PORT: "3005"
+    profiles: [telegram]
+
+  whatsapp-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: whatsapp-worker
+    container_name: whatsapp-worker
+    ports:
+      - "${WHATSAPP_WEBHOOK_PORT:-3006}:3006"
+    environment:
+      WEBHOOK_PORT: "3006"
+    profiles: [whatsapp]
+
+  signal-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: signal-worker
+    container_name: signal-worker
+    # signal-cli socket must be bind-mounted from the host
+    volumes:
+      - worker_data:/data
+      - ${SIGNAL_CLI_SOCKET_DIR:-/var/run/signal-cli}:/var/run/signal-cli:ro
+    environment:
+      SIGNAL_CLI_SOCKET: /var/run/signal-cli/socket
+    profiles: [signal]
+
+  # ── Scheduling workers ────────────────────────────────────────────────────────
+
+  calendly-worker:
+    <<: *worker-base
+    build:
+      context: .
+      dockerfile: worker.Dockerfile
+      args:
+        WORKER: calendly-worker
+    container_name: calendly-worker
+    ports:
+      - "${CALENDLY_WEBHOOK_PORT:-3004}:3004"
+    environment:
+      WEBHOOK_PORT: "3004"
+    profiles: [calendly]
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+
+volumes:
+  couchbase_data:
+  sg_logs:
+  worker_data:
