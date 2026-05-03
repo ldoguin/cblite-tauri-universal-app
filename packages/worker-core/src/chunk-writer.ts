@@ -1,5 +1,5 @@
 import axios, { type AxiosInstance } from "axios";
-import { randomUUID } from "crypto";
+import { createHash } from "crypto";
 import type { ChunkDoc, SgConfig } from "./types.js";
 import { chunkText } from "./chunker.js";
 import { ServerEmbedder } from "./embedder.js";
@@ -74,13 +74,22 @@ export class ChunkWriter {
     let written = 0;
 
     for (let i = 0; i < chunks.length; i++) {
+      // Stable ID derived from source doc + chunk content so that retrying
+      // with the same text produces the same ID (idempotent PUT) and changed
+      // text produces a new ID rather than silently overwriting a different chunk.
+      const contentHash = createHash("sha256")
+        .update(sourceDocId)
+        .update("\x00")
+        .update(chunks[i])
+        .digest("hex")
+        .slice(0, 16);
       const doc: ChunkDoc = {
-        id: `chunk::${sourceDocId}::${i}`,
+        id: `chunk::${sourceDocId}::${contentHash}`,
         type: "chunk",
         source_id: sourceDocId,
         source_collection: sourceCollection,
         source_owner: owner,
-        chunk_index: i,
+        chunk_index: i,  // preserved for ordering; ID is content-addressed
         text: chunks[i],
         server_embedding: embeddings[i],
         created_at: now,

@@ -13,7 +13,7 @@ import Placeholder from "@tiptap/extension-placeholder";
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
 import type {
   Note, Conversation, SyncConfig, UserProfile, AuthSession, SavedServer,
-  ChatAttachment, EncryptionMode, Board, Column, Task, ActionItem,
+  ChatAttachment, EncryptionMode, Board, Column, Task, ActionItem, KbFactProposal,
 } from "./types.js";
 import type {
   CblNoteList, CblConvList, CblChatMessages, CblPendingAttachments, CblServerList, CblKanbanBoard,
@@ -21,6 +21,8 @@ import type {
   ColumnCreateDetail, ColumnUpdateDetail, ColumnDeleteDetail,
   CblActionCard, CblActionDrawer,
   ActionApproveDetail, ActionRejectDetail, ActionEditDetail, ActionSaveDetail,
+  CblKbPanel, KbApplyDetail,
+  CblKbBrowser,
 } from "./components/index.js";
 import {
   migrateOwnerField as migrateOwnerFieldDB,
@@ -40,14 +42,17 @@ import {
   loadTasks, saveTaskDoc, deleteTaskDoc,
   loadActionItems, saveActionItem, updateActionStatus,
   saveChunkDoc, ensureVectorIndex,
+  loadKbProposals,
+  loadUserKb,
 } from "./storage.js";
 import { chunkText } from "./chunker.js";
-import { initLocalEmbedder, getLocalEmbedder } from "./local-embedder.js";
+import { initLocalEmbedder, getLocalEmbedder, terminateLocalEmbedder } from "./local-embedder.js";
 import type { ChunkDoc } from "./types.js";
 import { generateSalt } from "./crypto.js";
 import {
   serverLogin, serverRegister, searchUsers,
   fetchSyncConfig as fetchSyncConfigFromServer,
+  applyKbFacts, refreshToken,
 } from "./server.js";
 import type { SyncConfigFromServer, SyncConfigsFromServer } from "./server.js";
 import { resolveSyncUrl, userDbName } from "./auth-helpers.js";
@@ -80,8 +85,6 @@ export interface PlatformHooks {
    * Tauri enterprise only. Web: always undefined.
    */
   getSyncFieldEncryption: () => { password: string; salt: string } | undefined;
-  /** Whether to store the plaintext password in AuthSession (web uses it for basic auth) */
-  includePasswordInSession: boolean;
   /**
    * Normalize the encryption mode string from the create-account form.
    * Tauri: pass through as EncryptionMode. Web: map unknown values to "none".
@@ -89,6 +92,12 @@ export interface PlatformHooks {
   normalizeEncMode: (mode: string) => EncryptionMode;
   /** Register a callback for window-close / page-unload to flush dirty notes */
   onWindowUnload: (save: () => Promise<void>) => void;
+  /**
+   * Called after a successful login/register with the plaintext password so
+   * platforms that need it for basic-auth sync (web) can store it outside of
+   * AuthSession. Optional — Tauri does not implement this.
+   */
+  onPasswordCapture?: (password: string | null) => void;
 }
 
 // ── Module-level state ────────────────────────────────────────────────────────
@@ -136,6 +145,56 @@ let actionItems: ActionItem[] = [];
 let actionCardEls: CblActionCard[] = [];
 let actionDrawerEl: CblActionDrawer | null = null;
 
+// ── KB state ──────────────────────────────────────────────────────────────────
+let kbProposals: KbFactProposal[] = [];
+let kbPanelEl: CblKbPanel | null = null;
+let kbBrowserEl: CblKbBrowser | null = null;
+
+// ── Token refresh ─────────────────────────────────────────────────────────────
+let _tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Schedule a token refresh 24 hours before expiry (or immediately if already
+ * within 24 hours). On success, updates `authSession` and reschedules.
+ */
+function scheduleTokenRefresh(session: AuthSession): void {
+  if (_tokenRefreshTimer) { clearTimeout(_tokenRefreshTimer); _tokenRefreshTimer = null; }
+  if (!session.token || !session.server_url) return;
+
+  // Decode expiry from JWT payload (no verification needed — server will reject if tampered).
+  // JWT uses base64url encoding (- and _ instead of + and /); normalise before atob().
+  let expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // fallback: 30 days
+  try {
+    const b64url = session.token.split(".")[1] ?? "";
+    // Convert base64url → standard base64, then pad to a multiple of 4.
+    const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/").padEnd(
+      b64url.length + (4 - (b64url.length % 4)) % 4, "="
+    );
+    const payload = JSON.parse(atob(b64)) as { exp?: number };
+    if (payload.exp) expiresAt = payload.exp * 1000;
+  } catch { /* use fallback */ }
+
+  const refreshAt = expiresAt - 24 * 60 * 60 * 1000; // 24 h before expiry
+  const delay = Math.max(0, refreshAt - Date.now());
+
+  _tokenRefreshTimer = setTimeout(async () => {
+    if (!authSession) return;
+    try {
+      const result = await refreshToken(authSession.server_url, authSession.token) as {
+        token: string; sync_config: unknown; sync_configs: unknown
+      };
+      authSession = { ...authSession, token: result.token };
+      scheduleTokenRefresh(authSession);
+    } catch (err) {
+      console.warn("[token-refresh] Failed:", err);
+      // Retry in 1 hour
+      _tokenRefreshTimer = setTimeout(() => {
+        if (authSession) scheduleTokenRefresh(authSession);
+      }, 60 * 60 * 1000);
+    }
+  }, delay);
+}
+
 // ── Error display ─────────────────────────────────────────────────────────────
 
 export function showError(msg: string): void {
@@ -182,6 +241,28 @@ function setupComponents(): void {
     };
     actionDrawerEl.addEventListener("cbl-action-save", (e) =>
       handleActionSave((e as CustomEvent<ActionSaveDetail>).detail).catch(console.error)
+    );
+  }
+
+  kbPanelEl = document.getElementById("kb-panel") as unknown as CblKbPanel;
+  kbBrowserEl = document.getElementById("kb-browser") as unknown as CblKbBrowser;
+
+  // KB tab switching
+  document.querySelectorAll<HTMLButtonElement>(".kb-view-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset["kbtab"];
+      document.querySelectorAll(".kb-view-tab").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      const proposalsPane = document.getElementById("kb-pane-proposals");
+      const browserPane = document.getElementById("kb-pane-browser");
+      if (proposalsPane) proposalsPane.hidden = tab !== "proposals";
+      if (browserPane) browserPane.hidden = tab !== "browser";
+      if (tab === "browser") loadKbBrowser().catch(console.error);
+    });
+  });
+  if (kbPanelEl) {
+    kbPanelEl.addEventListener("cbl-kb-apply", (e) =>
+      handleKbApply((e as CustomEvent<KbApplyDetail>).detail).catch(console.error)
     );
   }
 
@@ -708,6 +789,58 @@ function replaceActionItem(updated: ActionItem): void {
   if (idx >= 0) actionItems[idx] = updated; else actionItems.unshift(updated);
 }
 
+// ── KB panel + browser ────────────────────────────────────────────────────────
+
+async function loadKbPanel(): Promise<void> {
+  if (!currentUser || !kbPanelEl) return;
+  kbPanelEl.loading = true;
+  // Load proposals and the approved KB in parallel so entity linking works immediately.
+  const [proposals, kb] = await Promise.all([
+    loadKbProposals(_adapter, currentUser.username),
+    loadUserKb(_adapter, currentUser.username),
+  ]);
+  kbProposals = proposals;
+  kbPanelEl.loading = false;
+  kbPanelEl.kb = kb;
+  kbPanelEl.proposals = kbProposals;
+}
+
+async function loadKbBrowser(): Promise<void> {
+  if (!currentUser || !kbBrowserEl || !authSession) return;
+  kbBrowserEl.loading = true;
+  try {
+    // Try local CBLite first; fall back to server fetch.
+    let kb = await loadUserKb(_adapter, currentUser.username);
+    if (!kb) {
+      const { fetchUserKb } = await import("./server.js");
+      kb = await fetchUserKb(authSession.server_url, authSession.token);
+    }
+    kbBrowserEl.kb = kb;
+  } catch (err) {
+    console.error("[kb-browser] load failed:", err);
+    kbBrowserEl.kb = null;
+  } finally {
+    kbBrowserEl.loading = false;
+  }
+}
+
+async function handleKbApply(detail: KbApplyDetail): Promise<void> {
+  if (!authSession) return;
+  try {
+    await applyKbFacts(
+      authSession.server_url,
+      authSession.token,
+      detail.proposalId,
+      detail.approvedFactIds,
+      detail.rejectedFactIds,
+    );
+    // Reload proposals so settled facts disappear
+    await loadKbPanel();
+  } catch (err) {
+    showError(`KB apply failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function createBoard(name: string): Promise<void> {
   if (!currentUser) return;
   const now = new Date().toISOString();
@@ -921,21 +1054,24 @@ async function inviteMember(username: string): Promise<void> {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-function showPanel(name: "notes" | "chat" | "profile" | "tasks" | "actions"): void {
+function showPanel(name: "notes" | "chat" | "profile" | "tasks" | "actions" | "kb"): void {
   document.getElementById("panel-notes")!.hidden = name !== "notes";
   document.getElementById("panel-chat")!.hidden = name !== "chat";
   document.getElementById("panel-profile")!.hidden = name !== "profile";
   document.getElementById("panel-tasks")!.hidden = name !== "tasks";
   document.getElementById("panel-actions")?.toggleAttribute("hidden", name !== "actions");
+  document.getElementById("panel-kb")?.toggleAttribute("hidden", name !== "kb");
   document.getElementById("nav-notes")!.classList.toggle("active", name === "notes");
   document.getElementById("nav-chat")!.classList.toggle("active", name === "chat");
   document.getElementById("nav-profile")!.classList.toggle("active", name === "profile");
   document.getElementById("nav-tasks")!.classList.toggle("active", name === "tasks");
   document.getElementById("nav-actions")?.classList.toggle("active", name === "actions");
-  document.querySelector<HTMLElement>("main.editor")!.hidden = name === "chat" || name === "tasks" || name === "actions";
+  document.getElementById("nav-kb")?.classList.toggle("active", name === "kb");
+  document.querySelector<HTMLElement>("main.editor")!.hidden = name === "chat" || name === "tasks" || name === "actions" || name === "kb";
   document.getElementById("chat-view")!.hidden = name !== "chat";
   document.getElementById("tasks-view")!.hidden = name !== "tasks";
   document.getElementById("actions-view")?.toggleAttribute("hidden", name !== "actions");
+  document.getElementById("kb-view")?.toggleAttribute("hidden", name !== "kb");
   document.querySelector<HTMLElement>("main.editor")!.classList.remove("mobile-open");
   document.getElementById("chat-view")!.classList.remove("mobile-open");
 }
@@ -1053,12 +1189,14 @@ function buildAuthSession(
   username: string,
   password: string
 ): AuthSession {
+  // Notify the platform so it can store the password outside AuthSession
+  // (e.g. web uses it for SG basic-auth without keeping it in the session object).
+  _hooks.onPasswordCapture?.(password);
   const pub = result.sync_configs?.public;
   return {
     token: result.token,
     server_url: url,
     username,
-    ...(_hooks.includePasswordInSession ? { password } : {}),
     gateway_session_id: result.sync_config.gateway_session_id,
     gateway_cookie_name: result.sync_config.gateway_cookie_name,
     ...(pub?.sync_url ? {
@@ -1117,7 +1255,7 @@ async function handleLogin(
 
   await _adapter.closeDatabase();
   const encPassword = _hooks.getDbEncPassword(profile, password);
-  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions", "chunks"]);
+  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions", "chunks", "user_data"]);
   if (profile.encryption_mode !== "none") encryptionPassword = password;
 
   // Ensure CBLite vector index on chunks.local_embedding (non-fatal)
@@ -1206,7 +1344,7 @@ async function handleCreateAccount(
 
   await _adapter.closeDatabase();
   const encPassword = _hooks.getDbEncPassword(profile, password);
-  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions", "chunks"]);
+  await _adapter.openDatabase(dbDir, userDbName(username), encPassword, ["notes", "conversations", "tasks", "actions", "chunks", "user_data"]);
   if (encMode !== "none") encryptionPassword = password;
 
   // Ensure CBLite vector index on chunks.local_embedding (non-fatal)
@@ -1270,6 +1408,9 @@ async function handleLogout(): Promise<void> {
 
   try { await _adapter.stopReplication(); } catch { /* ignore */ }
 
+  if (_tokenRefreshTimer) { clearTimeout(_tokenRefreshTimer); _tokenRefreshTimer = null; }
+  if (searchDebounce) { clearTimeout(searchDebounce); searchDebounce = null; }
+  _hooks.onPasswordCapture?.(null);
   if (unlistenCollection) { unlistenCollection(); unlistenCollection = null; }
   if (unlistenReplication) { unlistenReplication(); unlistenReplication = null; }
 
@@ -1293,6 +1434,16 @@ async function handleLogout(): Promise<void> {
   if (actionDrawerEl) actionDrawerEl.item = null;
   const actionsContainer = document.getElementById("actions-list");
   if (actionsContainer) actionsContainer.innerHTML = "";
+  // Clear KB state
+  kbProposals = [];
+  if (kbPanelEl) { kbPanelEl.proposals = []; kbPanelEl.kb = null; kbPanelEl.loading = false; }
+  if (kbBrowserEl) { kbBrowserEl.kb = null; kbBrowserEl.loading = false; }
+  // Clear conversation state
+  conversations = [];
+  selectedConvId = null;
+  if (convListEl) { convListEl.conversations = []; convListEl.selectedId = null; }
+  // Terminate the embedding worker so the ONNX model is released
+  terminateLocalEmbedder();
 
   document.getElementById("editor-empty")!.hidden = false;
   document.getElementById("editor-content")!.hidden = true;
@@ -1330,6 +1481,9 @@ async function continueInit(): Promise<void> {
   await migrateOwnerFieldDB(_adapter, currentUser!.username);
   syncConfig = await loadSyncConfigDB(_adapter);
 
+  // Schedule proactive token refresh so sessions don't expire silently
+  if (authSession) scheduleTokenRefresh(authSession);
+
   updateProfilePanel();
 
   if (unlistenCollection) unlistenCollection();
@@ -1359,6 +1513,10 @@ async function continueInit(): Promise<void> {
       actionItems = await loadActionItems(_adapter, currentUser!.username);
       renderActionCards();
     }
+    // Reload KB proposals if the KB panel is active
+    if (!document.getElementById("panel-kb")?.hidden) {
+      await loadKbPanel();
+    }
   });
 
   unlistenReplication = await _adapter.onReplicationStatus((activity: string, error?: string) => {
@@ -1387,6 +1545,9 @@ async function continueInit(): Promise<void> {
       loadActionItems(_adapter, currentUser!.username)
         .then((items) => { actionItems = items; renderActionCards(); })
         .catch(console.error);
+      if (!document.getElementById("panel-kb")?.hidden) {
+        loadKbPanel().catch(console.error);
+      }
     }
   });
 
@@ -1453,6 +1614,10 @@ function wireAppButtons(): void {
   document.getElementById("nav-actions")?.addEventListener("click", async () => {
     showPanel("actions");
     await loadActionsPanel();
+  });
+  document.getElementById("nav-kb")?.addEventListener("click", async () => {
+    showPanel("kb");
+    await loadKbPanel();
   });
   document.getElementById("nav-profile")!.addEventListener("click", () => showPanel("profile"));
   document.querySelectorAll<HTMLButtonElement>(".profile-subnav-btn").forEach((btn) => {

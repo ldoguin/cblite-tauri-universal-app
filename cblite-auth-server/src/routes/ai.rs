@@ -17,7 +17,14 @@ pub struct ChatRequest {
     pub model: Option<String>,
     /// OpenAI-compatible base URL; overrides the server default when provided.
     pub openai_base_url: Option<String>,
+    /// Maximum tokens to generate. Capped server-side at MAX_TOKENS_CAP.
+    pub max_tokens: Option<u32>,
 }
+
+/// Hard upper bound on max_tokens to prevent runaway generation costs.
+const MAX_TOKENS_CAP: u32 = 4096;
+/// Hard upper bound on total serialised message payload (bytes).
+const MAX_MESSAGES_BYTES: usize = 64 * 1024; // 64 KiB
 
 #[derive(Serialize)]
 pub struct ChatResponse {
@@ -37,6 +44,14 @@ pub async fn chat(
         .ok_or(AppError::Unauthorized)?;
     validate_jwt(bearer, &state.jwt_secret).map_err(|_| AppError::Unauthorized)?;
 
+    // Reject oversized payloads before touching the LLM.
+    let messages_bytes = req.messages.to_string().len();
+    if messages_bytes > MAX_MESSAGES_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "messages payload too large ({messages_bytes} bytes, max {MAX_MESSAGES_BYTES})"
+        )));
+    }
+
     // User key takes priority; fall back to server-configured key.
     let api_key = req.api_key
         .as_deref()
@@ -55,9 +70,14 @@ pub async fn chat(
         .unwrap_or("https://api.openai.com/v1");
     let completions_url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
+    let max_tokens = req.max_tokens
+        .map(|t| t.min(MAX_TOKENS_CAP))
+        .unwrap_or(MAX_TOKENS_CAP);
+
     let openai_body = serde_json::json!({
         "model": model,
         "messages": req.messages,
+        "max_tokens": max_tokens,
     });
 
     let resp = state

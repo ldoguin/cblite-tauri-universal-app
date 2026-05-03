@@ -5,9 +5,13 @@
  * as promises. The worker is started lazily on the first embed call.
  */
 
+/** Per-request timeout — matches the worker-side EMBED_TIMEOUT_MS + model load headroom. */
+const REQUEST_TIMEOUT_MS = 90_000;
+
 interface PendingRequest {
   resolve: (embedding: number[]) => void;
   reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 export class LocalEmbedder {
@@ -31,7 +35,12 @@ export class LocalEmbedder {
     const id = String(++this.idCounter);
 
     return new Promise<number[]>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          reject(new Error(`[local-embedder] Request ${id} timed out after ${REQUEST_TIMEOUT_MS}ms`));
+        }
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
       worker.postMessage({ id, text });
     });
   }
@@ -40,8 +49,13 @@ export class LocalEmbedder {
   terminate(): void {
     this.worker?.terminate();
     this.worker = null;
-    for (const { reject } of this.pending.values()) {
-      reject(new Error("[local-embedder] Worker terminated"));
+    this._rejectAll(new Error("[local-embedder] Worker terminated"));
+  }
+
+  private _rejectAll(err: Error): void {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(err);
     }
     this.pending.clear();
   }
@@ -51,10 +65,32 @@ export class LocalEmbedder {
 
     this.worker = new Worker(this.workerUrl, { type: "module" });
 
-    this.worker.onmessage = (event: MessageEvent<{ id: string; embedding?: number[]; error?: string }>) => {
-      const { id, embedding, error } = event.data;
+    this.worker.onmessage = (
+      event: MessageEvent<
+        | { type: "model_ready" }
+        | { type: "model_error"; error: string }
+        | { id: string; embedding?: number[]; error?: string }
+      >
+    ) => {
+      const data = event.data;
+
+      // Typed broadcast messages from the worker (no request id).
+      if ("type" in data) {
+        if (data.type === "model_error") {
+          console.error("[local-embedder] Worker model load failed:", data.error);
+          // Reject all pending requests — the worker is unusable.
+          this._rejectAll(new Error(`[local-embedder] Model load failed: ${data.error}`));
+          this.worker?.terminate();
+          this.worker = null;
+        }
+        // model_ready is informational; no action needed.
+        return;
+      }
+
+      const { id, embedding, error } = data;
       const pending = this.pending.get(id);
       if (!pending) return;
+      clearTimeout(pending.timer);
       this.pending.delete(id);
       if (error) {
         pending.reject(new Error(error));
@@ -67,11 +103,7 @@ export class LocalEmbedder {
 
     this.worker.onerror = (err) => {
       console.error("[local-embedder] Worker error:", err);
-      // Reject all pending requests
-      for (const { reject } of this.pending.values()) {
-        reject(new Error(`[local-embedder] Worker error: ${err.message}`));
-      }
-      this.pending.clear();
+      this._rejectAll(new Error(`[local-embedder] Worker error: ${err.message}`));
       this.worker = null;
     };
 
@@ -85,6 +117,14 @@ let _instance: LocalEmbedder | null = null;
 
 export function getLocalEmbedder(): LocalEmbedder | null {
   return _instance;
+}
+
+/** Terminate the active embedding worker and release its memory. */
+export function terminateLocalEmbedder(): void {
+  if (_instance) {
+    _instance.terminate();
+    _instance = null;
+  }
 }
 
 export function initLocalEmbedder(workerUrl: string | URL): LocalEmbedder {

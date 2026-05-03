@@ -30,8 +30,16 @@ pub async fn register(
     if username.is_empty() {
         return Err(AppError::BadRequest("username is required".into()));
     }
-    if body.password.len() < 3 {
-        return Err(AppError::BadRequest("password must be at least 3 characters".into()));
+    if username.len() > 64 {
+        return Err(AppError::BadRequest("username must be 64 characters or fewer".into()));
+    }
+    if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(AppError::BadRequest(
+            "username may only contain letters, digits, underscores, and hyphens".into(),
+        ));
+    }
+    if body.password.len() < 8 {
+        return Err(AppError::BadRequest("password must be at least 8 characters".into()));
     }
 
     // Check uniqueness — user doc is keyed by username
@@ -87,6 +95,7 @@ pub async fn register(
                     "tasks":         { "admin_channels": [&user_channel] },
                     "actions":       { "admin_channels": [&user_channel] },
                     "chunks":        { "admin_channels": [&user_channel] },
+                    "user_data":     { "admin_channels": [&user_channel] },
                 }
             }
         });

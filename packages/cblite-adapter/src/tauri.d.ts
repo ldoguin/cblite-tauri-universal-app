@@ -51,6 +51,14 @@ declare module "@cblite" {
 
   export function unregisterPredictiveModel(name: string): Promise<void>;
 
+  export function createVectorIndex(
+    collection: string,
+    indexName: string,
+    expression: string,
+    dimensions: number,
+    centroids?: number
+  ): Promise<void>;
+
   export function saveBlob(dataB64: string, contentType: string): Promise<string>;
 
   export function getBlobData(digest: string): Promise<string>;

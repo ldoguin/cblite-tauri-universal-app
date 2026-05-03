@@ -231,7 +231,7 @@ pub async fn ensure_collection(
 /// Creates the CB scope named after the username and the five standard collections
 /// (`notes`, `conversations`, `tasks`, `actions`, `chunks`) inside it.
 pub async fn ensure_private_scope(cluster: &Cluster, private_bucket: &str, username: &str) {
-    let collections = ["notes", "conversations", "tasks", "actions", "chunks"];
+    let collections = ["notes", "conversations", "tasks", "actions", "chunks", "user_data"];
     for coll in &collections {
         ensure_collection(cluster, private_bucket, username, coll).await;
     }

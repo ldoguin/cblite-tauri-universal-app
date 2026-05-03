@@ -1,7 +1,7 @@
 // ── DB helpers (adapter-agnostic) ─────────────────────────────────────────────
 
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
-import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task, ActionItem, ActionStatus, ChunkDoc } from "./types.js";
+import type { Note, Conversation, SyncConfig, UserProfile, SavedServer, Board, Column, Task, ActionItem, ActionStatus, ChunkDoc, KbFactProposal } from "./types.js";
 import { unwrapEncryptable, encryptNoteFields, decryptNoteFields } from "./note-encryption.js";
 
 // ── Config / profile ──────────────────────────────────────────────────────────
@@ -444,6 +444,60 @@ export async function updateActionStatus(
   return saveActionItem(adapter, updated);
 }
 
+// ── KB Fact Proposals ─────────────────────────────────────────────────────────
+
+/**
+ * Load all pending KB fact proposals for the current user.
+ * Proposals live in the `actions` collection (synced from SG private-db).
+ */
+export async function loadKbProposals(
+  adapter: DatabaseAdapter,
+  username: string
+): Promise<KbFactProposal[]> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, owner, source_event_id, source_event_title," +
+        " source_worker, facts, created_at, updated_at" +
+        " FROM user_data" +
+        " WHERE type = 'kb_fact_proposal'" +
+        " AND owner = $username" +
+        " AND (deleted IS MISSING OR deleted = false)" +
+        " ORDER BY created_at DESC",
+      { username }
+    )) as Array<KbFactProposal & { facts: unknown }>;
+    return rows
+      .filter((r) => r && r.id)
+      .map((r) => ({ ...r, facts: Array.isArray(r.facts) ? r.facts : [] }));
+  } catch {
+    return [];
+  }
+}
+
+// ── User Knowledge Base ───────────────────────────────────────────────────────
+
+/** Load the approved user_kb document from the local CBLite store. */
+export async function loadUserKb(
+  adapter: DatabaseAdapter,
+  username: string
+): Promise<import("./types.js").UserKnowledgeBase | null> {
+  try {
+    const rows = (await adapter.executeQuery(
+      "N1QL",
+      "SELECT META().id AS id, type, owner, displayName, role, timezone, language," +
+        " projects, contacts, ignorePatterns, priorityPatterns, customInstructions," +
+        " facts, created_at, updated_at" +
+        " FROM user_data" +
+        " WHERE type = 'user_kb' AND owner = $username" +
+        " LIMIT 1",
+      { username }
+    )) as Array<import("./types.js").UserKnowledgeBase>;
+    return rows[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Chunks ────────────────────────────────────────────────────────────────────
 
 /** Upsert a chunk document in the `chunks` collection. */
@@ -494,17 +548,24 @@ export async function loadChunksBySource(
  * vector index creation is handled by the Tauri plugin via the ONNX model
  * registration path. For the web adapter this is a no-op.
  */
+/**
+ * Create a cosine-distance vector index on `chunks.local_embedding`.
+ *
+ * Uses 384 dimensions (all-MiniLM-L6-v2 output size) and SQ8 scalar
+ * quantization. Non-fatal — if the platform doesn't support vector indexes
+ * (web adapter, Android) the call is silently ignored and local RAG falls
+ * back to keyword search.
+ */
 export async function ensureVectorIndex(adapter: DatabaseAdapter): Promise<void> {
   try {
-    // The Tauri plugin creates the vector index when a predictive model named
-    // "local_embedding_index" is registered with onnxPath set to the sentinel
-    // value "vector_index:chunks:local_embedding".
-    await adapter.registerPredictiveModel("local_embedding_index", {
-      onnxPath: "vector_index:chunks:local_embedding",
-      inputField: "text",
-      outputField: "local_embedding",
-    });
+    await adapter.createVectorIndex(
+      "_default.chunks",
+      "chunks_local_embedding_idx",
+      "local_embedding",
+      384,   // all-MiniLM-L6-v2 output dimensions
+      0      // centroids = 0 → CBLite auto-selects sqrt(n)
+    );
   } catch {
-    // Non-fatal — vector search degrades to BM25 FTS if index is unavailable.
+    // Non-fatal — vector search degrades gracefully if index is unavailable.
   }
 }

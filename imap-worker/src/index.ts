@@ -1,9 +1,9 @@
 import "dotenv/config";
 import { mkdir } from "fs/promises";
 import {
-  SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig, extractActions,
+  Poller, SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig,
 } from "@cblite-uni-app/worker-core";
-import type { BaseWorkerConfig, SourceEvent } from "@cblite-uni-app/worker-core";
+import type { BaseWorkerConfig, SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
 import { ImapConnection, loadImapUserConfig } from "./provider.js";
 
 // ── Mail handler ──────────────────────────────────────────────────────────────
@@ -12,9 +12,8 @@ import { ImapConnection, loadImapUserConfig } from "./provider.js";
 
 async function handleNewMail(
   events: SourceEvent[],
-  username: string,
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  user: UserConfig,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   for (const event of events) {
@@ -22,34 +21,10 @@ async function handleNewMail(
       console.log(`[imap] Already processed ${event.id} — skipping`);
       continue;
     }
-
-    let drafts;
-    try {
-      drafts = await extractActions(event, config.llm, config.llmMode);
-    } catch (err) {
-      console.warn(`[imap] LLM failed for ${event.id} — will not mark processed:`, err);
-      // Don't mark processed — IMAP message is already marked \Seen on the server,
-      // so we won't re-fetch it. Log for manual review.
-      continue;
-    }
-
-    console.log(`[imap] '${event.title}' → ${drafts.length} action(s) for '${username}'`);
-
-    if (drafts.length > 0) {
-      let written: number;
-      try {
-        written = await writer.writeActions(drafts, event, username);
-      } catch (err) {
-        console.error(`[imap] SG write failed for ${event.id}:`, err);
-        continue; // don't mark processed
-      }
-      if (written < drafts.length) {
-        console.warn(`[imap] Partial write (${written}/${drafts.length}) for ${event.id}`);
-        continue;
-      }
-    }
-
-    await dedup.markProcessed(event.id);
+    console.log(`[imap] Processing '${event.title}' for '${user.username}'`);
+    await poller.processEvent(event, user).catch((err) =>
+      console.warn(`[imap] processEvent failed for ${event.id}:`, err)
+    );
   }
 }
 
@@ -68,6 +43,8 @@ async function main(): Promise<void> {
   const dedup = new DedupStore(config.stateDbPath, "imap-worker-state");
   await dedup.open();
   const writer = new SgWriter(config.sg);
+  const poller = new Poller(config, users, { listEvents: async () => [] }, writer, dedup);
+  await poller.start();
 
   const connections: ImapConnection[] = [];
 
@@ -83,11 +60,10 @@ async function main(): Promise<void> {
     const conn = new ImapConnection(
       user.username,
       imapConfig,
-      (events, username) => handleNewMail(events, username, config, writer, dedup),
+      (events, _username) => handleNewMail(events, user, poller, dedup),
       pollIntervalSeconds * 1000
     );
     connections.push(conn);
-    // Start each connection independently — failures in one don't affect others
     conn.start().catch((err) =>
       console.error(`[imap-worker] Fatal error for '${user.username}':`, err)
     );
@@ -100,6 +76,7 @@ async function main(): Promise<void> {
   const shutdown = async (sig: string) => {
     console.log(`[imap-worker] ${sig} — shutting down…`);
     await Promise.allSettled(connections.map((c) => c.stop()));
+    await poller.stop();
     await dedup.close();
     process.exit(0);
   };

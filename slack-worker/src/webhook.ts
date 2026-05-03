@@ -1,8 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createHmac, timingSafeEqual } from "crypto";
 import { WebClient } from "@slack/web-api";
-import type { DedupStore, Poller, SgWriter, SourceEvent, UserConfig, BaseWorkerConfig } from "@cblite-uni-app/worker-core";
-import { extractActions } from "@cblite-uni-app/worker-core";
+import type { DedupStore, Poller, SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
 
 interface SlackUser { username: string; slack_user_id: string }
 
@@ -11,18 +10,16 @@ export function startSlackWebhookServer(
   botToken: string,
   signingSecret: string,
   users: SlackUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): void {
   const slack = new WebClient(botToken);
-  // Build reverse map: slack_user_id → UserConfig
   const userMap = new Map<string, UserConfig>(
     users.map((u) => [u.slack_user_id, u as unknown as UserConfig])
   );
 
   const server = createServer((req, res) => {
-    handle(req, res, signingSecret, slack, userMap, config, writer, dedup).catch((err) => {
+    handle(req, res, signingSecret, slack, userMap, poller, dedup).catch((err) => {
       console.error("[slack-webhook] Error:", err);
       res.writeHead(500).end();
     });
@@ -36,8 +33,7 @@ async function handle(
   signingSecret: string,
   slack: WebClient,
   userMap: Map<string, UserConfig>,
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   if (req.method !== "POST" || req.url !== "/slack/events") { res.writeHead(404).end(); return; }
@@ -97,20 +93,9 @@ async function handle(
     raw: event,
   };
 
-  let drafts;
-  try {
-    drafts = await extractActions(sourceEvent, config.llm, config.llmMode);
-  } catch (err) {
-    console.warn(`[slack] LLM failed for event ${eventId}:`, err);
-    return;
-  }
-
-  if (drafts.length > 0) {
-    const written = await writer.writeActions(drafts, sourceEvent, user.username);
-    if (written < drafts.length) return; // partial — don't mark processed
-  }
-
-  await dedup.markProcessed(eventId);
+  await poller.processEvent(sourceEvent, user).catch((err) =>
+    console.warn(`[slack] processEvent failed for ${eventId}:`, err)
+  );
 }
 
 function verifySlackSignature(req: IncomingMessage, body: string, secret: string): boolean {

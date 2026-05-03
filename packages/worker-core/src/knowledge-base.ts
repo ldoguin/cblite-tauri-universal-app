@@ -2,7 +2,8 @@ import axios, { type AxiosInstance } from "axios";
 import { readFile } from "fs/promises";
 import type { SgConfig, UserKnowledgeBase } from "./types.js";
 
-const KB_DOC_ID = "user_kb";
+/** Per-user document key — must match the auth server's kb_doc_id(username). */
+const kbDocId = (username: string) => `user_kb::${username}`;
 const CACHE_TTL_MS = 5 * 60 * 1000; // re-fetch at most every 5 minutes
 
 interface CacheEntry {
@@ -13,7 +14,7 @@ interface CacheEntry {
 /**
  * Loads and caches per-user knowledge base documents from Sync Gateway.
  *
- * The document must have `type: "user_kb"` and `id: "user_kb"` in the
+ * The document must have `type: "user_kb"` and `id: "user_kb::{username}"` in the
  * `_default.user_data` collection. Workers can fall back to a local JSON
  * file when SG is unavailable or the document doesn't exist yet.
  */
@@ -66,7 +67,7 @@ export class KnowledgeBaseLoader {
   private async loadFromSg(username: string): Promise<UserKnowledgeBase | null> {
     try {
       const token = await this.getSessionToken(username);
-      const url = `/${this.config.db}/_default.user_data/${KB_DOC_ID}`;
+      const url = `/${this.config.db}/_default.user_data/${encodeURIComponent(kbDocId(username))}`;
       const res = await this.client.get<UserKnowledgeBase>(url, {
         headers: { Cookie: `SyncGatewaySession=${token}` },
       });

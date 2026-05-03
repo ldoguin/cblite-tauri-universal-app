@@ -38,4 +38,11 @@ export interface DatabaseAdapter {
     options?: { onnxPath?: string; inputField?: string; outputField?: string }
   ): Promise<void>;
   unregisterPredictiveModel(name: string): Promise<void>;
+  createVectorIndex(
+    collection: string,
+    indexName: string,
+    expression: string,
+    dimensions: number,
+    centroids?: number
+  ): Promise<void>;
 }

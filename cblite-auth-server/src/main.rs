@@ -4,7 +4,9 @@ use axum::{
 };
 use routes::ai;
 use tower_http::cors::{Any, CorsLayer};
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 mod auth;
 mod db;
@@ -34,10 +36,14 @@ type SyncFunctions = HashMap<String, HashMap<String, String>>;
 ///
 /// Panics with a clear message if the file is missing or contains invalid JSON.
 fn load_sync_functions(path: &str) -> SyncFunctions {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read sync function file '{path}': {e}"));
-    serde_json::from_str::<SyncFunctions>(&content)
-        .unwrap_or_else(|e| panic!("Invalid JSON in sync function file '{path}': {e}"))
+    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("ERROR: Failed to read sync function file '{path}': {e}");
+        std::process::exit(1);
+    });
+    serde_json::from_str::<SyncFunctions>(&content).unwrap_or_else(|e| {
+        eprintln!("ERROR: Invalid JSON in sync function file '{path}': {e}");
+        std::process::exit(1);
+    })
 }
 
 #[derive(Clone)]
@@ -61,6 +67,8 @@ pub struct AppState {
     pub openai_api_key: Option<String>,
     /// Optional OpenAI-compatible base URL (e.g. for Ollama or Azure); overridden per-request.
     pub openai_base_url: Option<String>,
+    /// Model name for LLM calls (default: "gpt-4o-mini").
+    pub openai_model: String,
     /// Name of the private Couchbase bucket (per-user scopes live here).
     pub private_bucket: String,
     /// Couchbase management REST URL for vector index creation, e.g. "http://localhost:8094"
@@ -75,6 +83,10 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt_secret = std::env::var("JWT_SECRET")
         .expect("JWT_SECRET env var is required");
+    if jwt_secret.len() < 32 {
+        eprintln!("ERROR: JWT_SECRET must be at least 32 characters");
+        std::process::exit(1);
+    }
 
     // Couchbase Server connection
     let cb_uri      = std::env::var("COUCHBASE_URI").unwrap_or_else(|_| "couchbase://localhost".into());
@@ -140,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
         db::ensure_collection(&cb.cluster, &private_bucket, "_default", "tasks").await;
         db::ensure_collection(&cb.cluster, &private_bucket, "_default", "actions").await;
         db::ensure_collection(&cb.cluster, &private_bucket, "_default", "chunks").await;
+        db::ensure_collection(&cb.cluster, &private_bucket, "_default", "user_data").await;
 
         if let Some(db_name) = &sg_db {
             println!("SG private-db: {admin_url}/{db_name} | sync: {}", sg_sync_url.as_deref().unwrap_or("(not set)"));
@@ -165,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
 
     let openai_api_key  = std::env::var("OPENAI_API_KEY").ok();
     let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
+    let openai_model    = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
 
     let state = AppState {
         cb,
@@ -178,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         openai_api_key,
         openai_base_url,
+        openai_model,
         private_bucket,
         cb_search_url,
         cb_credentials,
@@ -188,13 +203,30 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Rate-limit auth endpoints: 5 requests per IP per minute (burst of 5).
+    let auth_rate_limiter = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(12)   // replenish 1 token every 12 s → 5/min steady state
+            .burst_size(5)
+            .finish()
+            .expect("invalid rate limiter config"),
+    );
+
+    let auth_router = Router::new()
+        .route("/auth/token", post(routes::sync::login))
+        .route("/auth/refresh", post(routes::sync::refresh_token))
+        .layer(GovernorLayer { config: auth_rate_limiter });
+
     let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
         .route("/users", post(routes::users::register))
         .route("/users/search", get(routes::users::search_users))
-        .route("/auth/token", post(routes::sync::login))
+        .merge(auth_router)
         .route("/sync/config", get(routes::sync::get_sync_config))
         .route("/ai/chat", post(ai::chat))
         .route("/boards/:board_id/members", post(routes::boards::add_member))
+        .route("/kb", get(routes::kb::get_kb))
+        .route("/kb/apply", post(routes::kb::apply_facts))
         .layer(cors)
         .with_state(state);
 
@@ -285,12 +317,13 @@ async fn ensure_sg_private_database(
         if(doc.local_only===true)throw({forbidden:'local_only document'});\
         var o=doc.owner||(oldDoc&&oldDoc.owner);\
         if(!o)throw({forbidden:'missing owner'});\
-        requireUser(o);channel('user.'+o);\
+        requireUser(o);requireAccess('user.'+o);channel('user.'+o);\
     }";
     let tasks_sync_fn = "function(doc,oldDoc){\
         if(doc.local_only===true)throw({forbidden:'local_only document'});\
         var bid=doc.board_id||(oldDoc&&oldDoc.board_id);\
         if(!bid)throw({forbidden:'missing board_id'});\
+        requireAccess('board.'+bid);\
         channel('board.'+bid);\
         if(doc.type==='board'){var members=doc.members||[];for(var i=0;i<members.length;i++){channel('user.'+members[i]);}}\
     }";
@@ -298,7 +331,7 @@ async fn ensure_sg_private_database(
         if(doc.local_only===true)throw({forbidden:'local_only document'});\
         var o=doc.source_owner||(oldDoc&&oldDoc.source_owner);\
         if(!o)throw({forbidden:'missing source_owner'});\
-        requireUser(o);channel('user.'+o);\
+        requireUser(o);requireAccess('user.'+o);channel('user.'+o);\
     }";
 
     // Helper: resolve a sync function — external file overrides default.
@@ -314,12 +347,13 @@ async fn ensure_sg_private_database(
         "origin": cors_origins, "login_origin": cors_origins, "headers": ["Authorization"]
     });
 
-    let default_fn   = resolve("_default",      user_sync_fn);
-    let notes_fn     = resolve("notes",         user_sync_fn);
-    let convs_fn     = resolve("conversations", user_sync_fn);
-    let tasks_fn     = resolve("tasks",         tasks_sync_fn);
-    let actions_fn   = resolve("actions",       user_sync_fn);
-    let chunks_fn    = resolve("chunks",        chunks_sync_fn);
+    let default_fn    = resolve("_default",      user_sync_fn);
+    let notes_fn      = resolve("notes",         user_sync_fn);
+    let convs_fn      = resolve("conversations", user_sync_fn);
+    let tasks_fn      = resolve("tasks",         tasks_sync_fn);
+    let actions_fn    = resolve("actions",       user_sync_fn);
+    let chunks_fn     = resolve("chunks",        chunks_sync_fn);
+    let user_data_fn  = resolve("user_data",     user_sync_fn);
 
     let coll_sync_pairs: Vec<(&str, String)> = vec![
         ("_default",      default_fn.clone()),
@@ -328,6 +362,7 @@ async fn ensure_sg_private_database(
         ("tasks",         tasks_fn.clone()),
         ("actions",       actions_fn.clone()),
         ("chunks",        chunks_fn.clone()),
+        ("user_data",     user_data_fn.clone()),
     ];
     // Convert to &str pairs for the helper
     let coll_sync_refs: Vec<(&str, &str)> = coll_sync_pairs.iter()
@@ -345,6 +380,7 @@ async fn ensure_sg_private_database(
                 "tasks":         { "sync": tasks_fn },
                 "actions":       { "sync": actions_fn },
                 "chunks":        { "sync": chunks_fn },
+                "user_data":     { "sync": user_data_fn },
             }}
         });
         let body = serde_json::json!({

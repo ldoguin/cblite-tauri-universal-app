@@ -28,10 +28,10 @@ async function main(): Promise<void> {
   await dedup.open();
   const writer = new SgWriter(config.sg);
   const poller = new Poller(config, users as UserConfig[], provider, writer, dedup);
-  poller.start();
+  await poller.start();
 
-  process.on("SIGINT", async () => { poller.stop(); await dedup.close(); process.exit(0); });
-  process.on("SIGTERM", async () => { poller.stop(); await dedup.close(); process.exit(0); });
+  process.on("SIGINT", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
+  process.on("SIGTERM", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
   console.log(`[jira-worker] Running. Users: ${users.map((u) => u.username).join(", ")}`);
 }
 

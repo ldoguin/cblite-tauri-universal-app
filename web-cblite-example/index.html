@@ -64,6 +64,13 @@
               <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
             </svg>
           </button>
+          <button class="rail-btn" id="nav-kb" data-panel="kb" title="Knowledge Base">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+              <path d="M2 17l10 5 10-5"/>
+              <path d="M2 12l10 5 10-5"/>
+            </svg>
+          </button>
           <button class="rail-btn" id="nav-profile" data-panel="profile" title="Profile">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
@@ -129,6 +136,13 @@
       <aside class="panel" id="panel-actions" hidden>
         <header class="panel-header">
           <span class="panel-title">Actions</span>
+        </header>
+      </aside>
+
+      <!-- ── KB Panel ──────────────────────────────────────────── -->
+      <aside class="panel" id="panel-kb" hidden>
+        <header class="panel-header">
+          <span class="panel-title">Knowledge Base</span>
         </header>
       </aside>
 
@@ -394,6 +408,29 @@
         </div>
         <div id="actions-list">
           <p id="actions-empty">No actions for today.</p>
+        </div>
+      </div>
+
+      <!-- ── KB View ───────────────────────────────────────────── -->
+      <div id="kb-view" class="chat-view" hidden>
+        <!-- Tab bar -->
+        <div class="kb-view-tabs">
+          <button class="kb-view-tab active" id="kb-tab-proposals" data-kbtab="proposals">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+            Proposals
+          </button>
+          <button class="kb-view-tab" id="kb-tab-browser" data-kbtab="browser">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+            Knowledge Base
+          </button>
+        </div>
+        <!-- Proposals tab -->
+        <div id="kb-pane-proposals" class="kb-view-pane">
+          <cbl-kb-panel id="kb-panel"></cbl-kb-panel>
+        </div>
+        <!-- Browser tab -->
+        <div id="kb-pane-browser" class="kb-view-pane" hidden>
+          <cbl-kb-browser id="kb-browser"></cbl-kb-browser>
         </div>
       </div>
 

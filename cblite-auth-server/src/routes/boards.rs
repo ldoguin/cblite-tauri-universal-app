@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{auth::validate_jwt, error::AppError, AppState};
 
@@ -35,11 +36,40 @@ pub async fn add_member(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(AppError::Unauthorized)?;
 
-    validate_jwt(bearer, &state.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+    let claims = validate_jwt(bearer, &state.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+
+    // Reject obviously invalid board IDs before hitting the DB.
+    if Uuid::parse_str(&board_id).is_err() {
+        return Err(AppError::BadRequest("invalid board_id".into()));
+    }
 
     let new_member = body.username.trim().to_owned();
     if new_member.is_empty() {
         return Err(AppError::BadRequest("username is required".into()));
+    }
+
+    // Verify the target user exists before granting access.
+    let user_key = format!("user::{new_member}");
+    if state.cb.get::<serde_json::Value>(&user_key).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    // Verify the caller is already a member of this board and re-read the
+    // current member list atomically so we don't grant based on stale data.
+    // Board documents live in the `tasks` collection.
+    #[derive(serde::Deserialize)]
+    struct BoardRow { members: Option<Vec<String>> }
+    let rows: Vec<BoardRow> = state.cb
+        .sqlpp(
+            "SELECT members FROM tasks WHERE META().id = $id AND type = 'board'",
+            serde_json::json!({ "$id": board_id }),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let board = rows.into_iter().next().ok_or(AppError::NotFound)?;
+    let members = board.members.unwrap_or_default();
+    if !members.iter().any(|m| m == &claims.username) {
+        return Err(AppError::Unauthorized);
     }
 
     // Grant board channel access on Sync Gateway (best-effort)
@@ -57,10 +87,13 @@ pub async fn grant_board_channel(state: &AppState, username: &str, board_id: &st
 
     let board_channel = format!("board.{board_id}");
     let user_channel = format!("user.{username}");
+    let sg_timeout = std::time::Duration::from_secs(10);
 
-    // Fetch current user to merge channels rather than overwrite
-    let user_url = format!("{sg_url}/{sg_db}/_user/{username}");
-    let mut get_req = state.http.get(&user_url);
+    // Fetch current user to merge channels rather than overwrite.
+    // URL-encode the username to prevent path traversal.
+    let encoded_username = urlencoding::encode(username);
+    let user_url = format!("{sg_url}/{sg_db}/_user/{encoded_username}");
+    let mut get_req = state.http.get(&user_url).timeout(sg_timeout);
     if let Some(auth) = &state.sg_admin_auth {
         get_req = get_req.header("Authorization", auth);
     }
@@ -91,11 +124,12 @@ pub async fn grant_board_channel(state: &AppState, username: &str, board_id: &st
                 "tasks":         { "admin_channels": channels },
                 "actions":       { "admin_channels": [&user_channel] },
                 "chunks":        { "admin_channels": [&user_channel] },
+                "user_data":     { "admin_channels": [&user_channel] },
             }
         }
     });
 
-    let mut put_req = state.http.put(&user_url).json(&sg_user);
+    let mut put_req = state.http.put(&user_url).timeout(sg_timeout).json(&sg_user);
     if let Some(auth) = &state.sg_admin_auth {
         put_req = put_req.header("Authorization", auth);
     }

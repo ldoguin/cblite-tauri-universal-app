@@ -2,10 +2,12 @@ import "dotenv/config";
 import { mkdir } from "fs/promises";
 import { createServer } from "http";
 import axios from "axios";
-import { SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig, extractActions } from "@cblite-uni-app/worker-core";
-import type { BaseWorkerConfig, SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
+import {
+  Poller, SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig,
+} from "@cblite-uni-app/worker-core";
+import type { SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
 
-interface TelegramUser { username: string; telegram_chat_id: number }
+interface TelegramUser extends UserConfig { telegram_chat_id: number }
 interface TelegramUpdate {
   update_id: number;
   message?: {
@@ -21,8 +23,7 @@ interface TelegramUpdate {
 async function processUpdate(
   update: TelegramUpdate,
   users: TelegramUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   const msg = update.message;
@@ -52,26 +53,15 @@ async function processUpdate(
     raw: msg as unknown as Record<string, unknown>,
   };
 
-  let drafts;
-  try {
-    drafts = await extractActions(event, config.llm, config.llmMode);
-  } catch (err) {
-    console.warn(`[telegram] LLM failed for event ${eventId}:`, err);
-    return;
-  }
-
-  if (drafts.length > 0) {
-    const written = await writer.writeActions(drafts, event, user.username);
-    if (written < drafts.length) return;
-  }
-  await dedup.markProcessed(eventId);
+  await poller.processEvent(event, user).catch((err) =>
+    console.warn(`[telegram] processEvent failed for ${eventId}:`, err)
+  );
 }
 
 async function startLongPolling(
   botToken: string,
   users: TelegramUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   const base = `https://api.telegram.org/bot${botToken}`;
@@ -86,7 +76,7 @@ async function startLongPolling(
         timeout: 35_000,
       });
       for (const update of res.data.result) {
-        await processUpdate(update, users, config, writer, dedup);
+        await processUpdate(update, users, poller, dedup);
         offset = update.update_id + 1;
       }
     } catch (err) {
@@ -101,12 +91,10 @@ function startWebhookMode(
   botToken: string,
   webhookUrl: string,
   users: TelegramUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): void {
   const base = `https://api.telegram.org/bot${botToken}`;
-  // Register webhook
   axios.post(`${base}/setWebhook`, { url: `${webhookUrl}/telegram` })
     .then(() => console.log(`[telegram] Webhook registered at ${webhookUrl}/telegram`))
     .catch((err) => console.error("[telegram] Failed to register webhook:", err));
@@ -119,7 +107,7 @@ function startWebhookMode(
       res.writeHead(200).end("OK");
       try {
         const update = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as TelegramUpdate;
-        processUpdate(update, users, config, writer, dedup).catch((e) =>
+        processUpdate(update, users, poller, dedup).catch((e) =>
           console.error("[telegram] processUpdate error:", e)
         );
       } catch (e) { console.error("[telegram] JSON parse error:", e); }
@@ -144,17 +132,19 @@ async function main(): Promise<void> {
   const dedup = new DedupStore(config.stateDbPath, "telegram-worker-state");
   await dedup.open();
   const writer = new SgWriter(config.sg);
+  const poller = new Poller(config, users, { listEvents: async () => [] }, writer, dedup);
+  await poller.start();
 
-  process.on("SIGINT", async () => { await dedup.close(); process.exit(0); });
-  process.on("SIGTERM", async () => { await dedup.close(); process.exit(0); });
+  process.on("SIGINT", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
+  process.on("SIGTERM", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
 
   const webhookUrl = process.env["TELEGRAM_WEBHOOK_URL"];
   if (config.webhookPort && webhookUrl) {
-    startWebhookMode(config.webhookPort, botToken, webhookUrl, users, config, writer, dedup);
+    startWebhookMode(config.webhookPort, botToken, webhookUrl, users, poller, dedup);
     console.log(`[telegram-worker] Running in webhook mode. Users: ${users.map((u) => u.username).join(", ")}`);
   } else {
     console.log(`[telegram-worker] Running in long-poll mode. Users: ${users.map((u) => u.username).join(", ")}`);
-    await startLongPolling(botToken, users, config, writer, dedup);
+    await startLongPolling(botToken, users, poller, dedup);
   }
 }
 

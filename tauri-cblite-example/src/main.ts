@@ -5,6 +5,7 @@ import {
   startReplication as _startReplication, stopReplication,
   onCollectionChanged, onReplicationStatus,
   saveBlob, getBlobData, registerPredictiveModel, unregisterPredictiveModel,
+  createVectorIndex,
 } from "@cblite";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -41,6 +42,7 @@ function startReplication(
     "_default.tasks",
     "_default.actions",
     "_default.chunks",
+    "_default.user_data",
   ].filter((c) => c !== primary);
   return _startReplication(url, primary, direction, auth, fieldEncryption, extras);
 }
@@ -50,6 +52,7 @@ const adapter: DatabaseAdapter = {
   startReplication, stopReplication, saveBlob, getBlobData,
   onCollectionChanged, onReplicationStatus,
   registerPredictiveModel, unregisterPredictiveModel,
+  createVectorIndex,
 };
 
 // ── Tauri file operations ─────────────────────────────────────────────────────

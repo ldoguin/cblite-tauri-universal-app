@@ -12,6 +12,8 @@ export type {
   UserKnowledgeBase,
   KbContact,
   KbProject,
+  KbFact,
+  KbFactProposal,
 } from "./types.js";
 
 export { extractActions } from "./llm.js";
@@ -26,3 +28,5 @@ export { ChunkWriter } from "./chunk-writer.js";
 export { ServerEmbedder } from "./embedder.js";
 export { chunkText } from "./chunker.js";
 export { retrieveContext } from "./rag.js";
+export { extractFacts } from "./fact-extractor.js";
+export { FactWriter } from "./fact-writer.js";

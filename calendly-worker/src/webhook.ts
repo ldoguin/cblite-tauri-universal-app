@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createHmac, timingSafeEqual } from "crypto";
-import type { BaseWorkerConfig, DedupStore, SgWriter, SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
-import { extractActions } from "@cblite-uni-app/worker-core";
+import type { DedupStore, Poller, SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
 
 type Provider = "calendly" | "calcom";
 
@@ -15,12 +14,11 @@ export function startCalendlyWebhookServer(
   provider: Provider,
   webhookSecret: string,
   users: UserWithScheduling[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): void {
   const server = createServer((req, res) => {
-    handle(req, res, provider, webhookSecret, users, config, writer, dedup).catch((err) => {
+    handle(req, res, provider, webhookSecret, users, poller, dedup).catch((err) => {
       console.error("[calendly-webhook] Error:", err);
       res.writeHead(500).end();
     });
@@ -34,8 +32,7 @@ async function handle(
   provider: Provider,
   secret: string,
   users: UserWithScheduling[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   if (req.method !== "POST" || req.url !== "/webhook") { res.writeHead(404).end(); return; }
@@ -59,20 +56,9 @@ async function handle(
 
   if (await dedup.isProcessed(event.id)) return;
 
-  let drafts;
-  try {
-    drafts = await extractActions(event, config.llm, config.llmMode);
-  } catch (err) {
-    console.warn(`[calendly] LLM failed for event ${event.id}:`, err);
-    return;
-  }
-
-  if (drafts.length > 0) {
-    const written = await writer.writeActions(drafts, event, user.username);
-    if (written < drafts.length) return;
-  }
-
-  await dedup.markProcessed(event.id);
+  await poller.processEvent(event, user).catch((err) =>
+    console.warn(`[calendly] processEvent failed for ${event.id}:`, err)
+  );
 }
 
 // ── Calendly parser ───────────────────────────────────────────────────────────

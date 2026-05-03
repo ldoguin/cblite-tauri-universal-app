@@ -17,19 +17,31 @@ export function loadBaseConfig(): Omit<BaseWorkerConfig, "pollIntervalSeconds"> 
     },
     llmMode,
     sg: loadSgConfig(),
-    webhookPort: webhookPortRaw ? parseInt(webhookPortRaw, 10) : undefined,
+    webhookPort: webhookPortRaw ? parseIntEnv("WEBHOOK_PORT", 3001) : undefined,
     stateDbPath: process.env["STATE_DB_PATH"] ?? "./data",
     embedding: loadEmbeddingConfig(),
   };
+}
+
+/** Parse an integer env var, falling back to `defaultVal` if missing or non-numeric. */
+function parseIntEnv(name: string, defaultVal: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultVal;
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n)) {
+    console.warn(`[config] ${name}="${raw}" is not a valid integer — using default ${defaultVal}`);
+    return defaultVal;
+  }
+  return n;
 }
 
 /** Parse embedding / chunking env vars. */
 export function loadEmbeddingConfig(): EmbeddingConfig {
   return {
     model: process.env["EMBEDDING_MODEL"] ?? "text-embedding-3-large",
-    chunkSize: parseInt(process.env["CHUNK_SIZE"] ?? "512", 10),
-    chunkOverlap: parseInt(process.env["CHUNK_OVERLAP"] ?? "64", 10),
-    ragTopK: parseInt(process.env["RAG_TOP_K"] ?? "5", 10),
+    chunkSize: parseIntEnv("CHUNK_SIZE", 512),
+    chunkOverlap: parseIntEnv("CHUNK_OVERLAP", 64),
+    ragTopK: parseIntEnv("RAG_TOP_K", 5),
   };
 }
 
@@ -51,13 +63,23 @@ export function loadSgConfig(): SgConfig {
 }
 
 export function loadUsersRaw(): UserConfig[] {
+  let parsed: unknown;
   try {
-    const users = JSON.parse(process.env["USERS"] ?? "[]") as UserConfig[];
-    if (!Array.isArray(users) || users.length === 0) throw new Error("empty");
-    return users;
+    parsed = JSON.parse(process.env["USERS"] ?? "[]");
   } catch {
+    throw new Error("USERS env var is not valid JSON");
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error("USERS env var must be a non-empty JSON array");
   }
+  // Validate each entry has the required `username` field.
+  for (let i = 0; i < parsed.length; i++) {
+    const u = parsed[i];
+    if (typeof u !== "object" || u === null || typeof (u as Record<string, unknown>)["username"] !== "string") {
+      throw new Error(`USERS[${i}] is missing a required string "username" field`);
+    }
+  }
+  return parsed as UserConfig[];
 }
 
 export function validateBaseConfig(config: BaseWorkerConfig, users: UserConfig[]): void {
@@ -70,6 +92,23 @@ export function validateBaseConfig(config: BaseWorkerConfig, users: UserConfig[]
           `No SG password for '${u.username}'. Set SG_PASSWORD_${u.username.toUpperCase()} or SG_SERVICE_USERNAME/SG_SERVICE_PASSWORD.`
         );
       }
+    }
+  }
+
+  // Validate CB_CREDENTIALS early so a misconfigured value is caught at startup
+  // rather than silently producing an invalid Authorization header at query time.
+  const cbCreds = process.env["CB_CREDENTIALS"] ?? "";
+  if (cbCreds) {
+    if (!cbCreds.includes(":")) {
+      throw new Error(
+        'CB_CREDENTIALS must be in "username:password" format (colon-separated)'
+      );
+    }
+    // Reject values that look like they are already base64-encoded (common misconfiguration).
+    if (/^[A-Za-z0-9+/]+=*$/.test(cbCreds) && !cbCreds.includes(":")) {
+      throw new Error(
+        "CB_CREDENTIALS appears to be base64-encoded — provide the raw username:password value"
+      );
     }
   }
 }

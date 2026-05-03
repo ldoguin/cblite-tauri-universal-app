@@ -203,7 +203,45 @@ export interface UserKnowledgeBase {
    */
   customInstructions?: string;
 
+  // ── Worker-extracted facts (approved by user) ─────────────────────────────
+  /** Free-form facts extracted by workers and approved by the user. */
+  facts?: KbFact[];
+
   // ── Metadata ──────────────────────────────────────────────────────────────
   created_at?: string;
   updated_at?: string;
+}
+
+// ── KB Facts ──────────────────────────────────────────────────────────────────
+
+/** A single fact extracted from a source event by a worker. */
+export interface KbFact {
+  /** Stable UUID assigned at extraction time. */
+  id: string;
+  /** Which field of UserKnowledgeBase this fact targets. */
+  kind: "contact" | "project" | "ignore_pattern" | "priority_pattern" | "custom_instruction";
+  /** Extracted value — KbContact for "contact", KbProject for "project", string for others. */
+  value: KbContact | KbProject | string;
+  /** LLM confidence score 0–1. */
+  confidence: number;
+  /** Human-readable reason the LLM extracted this fact. */
+  rationale: string;
+  /** Approval state — set by the user in the app. */
+  status: "pending" | "approved" | "rejected";
+}
+
+/**
+ * One SG document per fact extraction batch.
+ * Stored in `_default.user_data`, routed to `user.<owner>` channel.
+ */
+export interface KbFactProposal {
+  id: string;                   // "kb_proposal::<owner>::<sourceEventId>"
+  type: "kb_fact_proposal";
+  owner: string;
+  source_event_id: string;
+  source_event_title: string;
+  source_worker: string;        // e.g. "email", "github", "slack"
+  facts: KbFact[];
+  created_at: string;
+  updated_at: string;
 }

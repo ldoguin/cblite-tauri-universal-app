@@ -8,7 +8,9 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system app && useradd --system --gid app --no-create-home app
 COPY --from=builder /app/target/release/cblite-auth-server /usr/local/bin/cblite-auth-server
+USER app
 EXPOSE 3000
 CMD ["cblite-auth-server"]

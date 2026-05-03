@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { mkdir } from "fs/promises";
-import { SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig } from "@cblite-uni-app/worker-core";
+import { Poller, SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig } from "@cblite-uni-app/worker-core";
 import { startSlackWebhookServer } from "./webhook.js";
 
 async function main(): Promise<void> {
@@ -23,11 +23,13 @@ async function main(): Promise<void> {
   const dedup = new DedupStore(config.stateDbPath, "slack-worker-state");
   await dedup.open();
   const writer = new SgWriter(config.sg);
+  const poller = new Poller(config, users, { listEvents: async () => [] }, writer, dedup);
+  await poller.start();
 
-  startSlackWebhookServer(config.webhookPort, botToken, signingSecret, users, config, writer, dedup);
+  startSlackWebhookServer(config.webhookPort, botToken, signingSecret, users, poller, dedup);
 
-  process.on("SIGINT", async () => { await dedup.close(); process.exit(0); });
-  process.on("SIGTERM", async () => { await dedup.close(); process.exit(0); });
+  process.on("SIGINT", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
+  process.on("SIGTERM", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
   console.log(`[slack-worker] Running on port ${config.webhookPort}. Users: ${users.map((u) => u.username).join(", ")}`);
 }
 

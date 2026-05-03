@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{header::AUTHORIZATION, HeaderMap},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -100,17 +100,125 @@ pub async fn login(
     Ok(Json(LoginResponse { token, sync_config, sync_configs }))
 }
 
+/// Refresh a JWT without re-supplying credentials.
+///
+/// Validates the existing Bearer token, then issues a fresh one with a new
+/// expiry. The SG session is also refreshed so the client can keep syncing.
+pub async fn refresh_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LoginResponse>, (StatusCode, String)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token".into()))?;
+
+    let claims = validate_jwt(auth_header, &state.jwt_secret)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired token".into()))?;
+
+    let user: User = state.cb
+        .get(&format!("user::{}", claims.username))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".into()))?;
+
+    let token = create_jwt(&user.id, &user.username, &state.jwt_secret)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let cfg: Option<UserSyncConfig> = state.cb
+        .get(&format!("sync_config::{}", user.id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Refresh the SG session (no password needed — admin API creates it directly)
+    let (gateway_session_id, gateway_cookie_name) =
+        refresh_sg_session(&state, &user.username).await;
+
+    let private_sync_url = cfg.as_ref()
+        .map(|c| c.sync_url.clone())
+        .unwrap_or_else(|| state.sg_sync_url.clone().unwrap_or_default());
+    let private_collection = cfg.as_ref()
+        .map(|c| c.sync_collection.clone())
+        .unwrap_or_else(|| "_default.notes".into());
+
+    let sync_config = SyncConfigResponse {
+        sync_url: private_sync_url.clone(),
+        sync_collection: private_collection.clone(),
+        sync_direction: "both".into(),
+        gateway_session_id: gateway_session_id.clone(),
+        gateway_cookie_name: gateway_cookie_name.clone(),
+    };
+
+    let sync_configs = SyncConfigs {
+        private: SyncEntry {
+            sync_url: private_sync_url,
+            sync_collection: private_collection,
+            sync_direction: "both".into(),
+            gateway_session_id: gateway_session_id.clone(),
+            gateway_cookie_name: gateway_cookie_name.clone(),
+        },
+        public: SyncEntry {
+            sync_url: state.sg_public_sync_url.clone().unwrap_or_default(),
+            sync_collection: "_default.articles".into(),
+            sync_direction: "pull".into(),
+            gateway_session_id: None,
+            gateway_cookie_name: None,
+        },
+    };
+
+    Ok(Json(LoginResponse { token, sync_config, sync_configs }))
+}
+
+/// Timeout applied to every SG Admin API call in the login path.
+const SG_ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Create a new SG session for the user using the Admin API (no password required).
+async fn refresh_sg_session(
+    state: &AppState,
+    username: &str,
+) -> (Option<String>, Option<String>) {
+    let (Some(sg_url), Some(sg_db)) = (&state.sg_admin_url, &state.sg_db) else {
+        return (None, None);
+    };
+    let body = serde_json::json!({ "name": username });
+    let mut req = state.http
+        .post(format!("{}/{}/_session", sg_url, sg_db))
+        .timeout(SG_ADMIN_TIMEOUT)
+        .json(&body);
+    if let Some(auth) = &state.sg_admin_auth {
+        req = req.header("Authorization", auth);
+    }
+    let res = match req.send().await {
+        Ok(r) => r,
+        Err(e) => { eprintln!("SG session refresh failed (non-fatal): {e}"); return (None, None); }
+    };
+    if !res.status().is_success() {
+        eprintln!("SG session refresh returned {}", res.status());
+        return (None, None);
+    }
+    let json: serde_json::Value = match res.json().await {
+        Ok(j) => j,
+        Err(e) => { eprintln!("SG session refresh parse failed: {e}"); return (None, None); }
+    };
+    (
+        json["session_id"].as_str().map(str::to_owned),
+        json["cookie_name"].as_str().map(str::to_owned),
+    )
+}
+
 async fn create_sg_session(
     state: &AppState,
     username: &str,
-    password: &str,
+    // Password is no longer forwarded to SG; kept for API compatibility.
+    _password: &str,
 ) -> (Option<String>, Option<String>) {
     let (Some(sg_url), Some(sg_db)) = (&state.sg_admin_url, &state.sg_db) else {
         return (None, None);
     };
 
     // Ensure the SG user exists (idempotent PUT); handles DB resets without requiring re-registration.
-    ensure_sg_user(state, sg_url, sg_db, username, password).await;
+    ensure_sg_user(state, sg_url, sg_db, username).await;
 
     // Re-grant board channels the user is a member of (handles SG resets).
     regrant_board_channels(state, username).await;
@@ -118,6 +226,7 @@ async fn create_sg_session(
     let body = serde_json::json!({ "name": username });
     let mut req = state.http
         .post(format!("{}/{}/_session", sg_url, sg_db))
+        .timeout(SG_ADMIN_TIMEOUT)
         .json(&body);
     if let Some(auth) = &state.sg_admin_auth {
         req = req.header("Authorization", auth);
@@ -144,10 +253,18 @@ async fn create_sg_session(
 }
 
 /// Upsert the SG user (PUT is idempotent). Called at login to recover from SG database resets.
-async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &str, password: &str) {
+///
+/// Uses a server-generated random password so the user's real password is never
+/// stored in or forwarded to Sync Gateway. SG sessions are created via the Admin
+/// API (`POST /_session`) which does not require a password.
+async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &str) {
     let user_channel = format!("user.{username}");
+    // Random 32-byte password — SG never needs to verify it because sessions
+    // are created through the Admin API, not via SG's own login endpoint.
+    let sg_password = uuid::Uuid::new_v4().to_string();
+    let encoded_username = urlencoding::encode(username);
     let sg_user = serde_json::json!({
-        "password": password,
+        "password": sg_password,
         "admin_channels": [&user_channel],
         "collection_access": {
             "_default": {
@@ -156,11 +273,13 @@ async fn ensure_sg_user(state: &AppState, sg_url: &str, sg_db: &str, username: &
                 "tasks":         { "admin_channels": [&user_channel] },
                 "actions":       { "admin_channels": [&user_channel] },
                 "chunks":        { "admin_channels": [&user_channel] },
+                "user_data":     { "admin_channels": [&user_channel] },
             }
         }
     });
     let mut req = state.http
-        .put(format!("{}/{}/_user/{}", sg_url, sg_db, username))
+        .put(format!("{}/{}/_user/{}", sg_url, sg_db, encoded_username))
+        .timeout(SG_ADMIN_TIMEOUT)
         .json(&sg_user);
     if let Some(auth) = &state.sg_admin_auth {
         req = req.header("Authorization", auth);
@@ -180,10 +299,11 @@ async fn regrant_board_channels(state: &AppState, username: &str) {
         return;
     }
 
-    // The notes bucket (same as sg_db name) stores board documents.
-    let sg_bucket = state.sg_db.as_deref().unwrap_or("notes");
+    // Use `private_bucket` (the Couchbase bucket name) not `sg_db` (the SG
+    // database name) — these differ in typical deployments.
+    let bucket = &state.private_bucket;
     let statement = format!(
-        "SELECT META().id AS id FROM `{sg_bucket}`.`_default`.`tasks` \
+        "SELECT META().id AS id FROM `{bucket}`.`_default`.`tasks` \
          WHERE type = 'board' AND (owner = $username OR ANY m IN members SATISFIES m = $username END)"
     );
 

@@ -2,6 +2,7 @@ import {
   openDatabase, closeDatabase, executeQuery, getDocument, saveDocument,
   startReplication, stopReplication, onCollectionChanged, onReplicationStatus,
   saveBlob, getBlobData, registerPredictiveModel, unregisterPredictiveModel,
+  createVectorIndex,
 } from "@cblite";
 import type { DatabaseAdapter } from "@cblite-uni-app/cblite-adapter";
 import "@cblite-uni-app/shared/components";
@@ -19,6 +20,7 @@ const adapter: DatabaseAdapter = {
   startReplication, stopReplication, saveBlob, getBlobData,
   onCollectionChanged, onReplicationStatus,
   registerPredictiveModel, unregisterPredictiveModel,
+  createVectorIndex,
 };
 
 // ── Browser file-picker helpers ───────────────────────────────────────────────
@@ -88,17 +90,22 @@ async function handleChatAttach(): Promise<void> {
 
 // ── Platform hooks ────────────────────────────────────────────────────────────
 
+// Kept in a module-level variable so it is never serialised into AuthSession
+// or accessible outside this module. Cleared on logout via setSyncPassword(null).
+let _syncPassword: string | null = null;
+export function setSyncPassword(pw: string | null): void { _syncPassword = pw; }
+
 const hooks = {
   getDbDir: async () => "",
   attachImage: handleAttachImage,
   attachFile: handleAttachFile,
   chatAttach: handleChatAttach,
   getDbEncPassword: () => undefined,
-  getSyncAuth: () => authSession?.username && authSession?.password
-    ? { username: authSession.username, password: authSession.password }
+  getSyncAuth: () => authSession?.username && _syncPassword
+    ? { username: authSession.username, password: _syncPassword }
     : undefined,
   getSyncFieldEncryption: () => undefined,
-  includePasswordInSession: true,
+  onPasswordCapture: (pw) => { _syncPassword = pw; },
   normalizeEncMode: (mode: string): EncryptionMode => mode === "app-level" ? "app-level" : "none",
   onWindowUnload: (save: () => Promise<void>) => {
     window.addEventListener("beforeunload", (e) => {

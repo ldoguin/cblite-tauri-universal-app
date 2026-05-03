@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── TypeScript: typecheck + build ──────────────────────────────────────────
+  ts-build:
+    name: TypeScript build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck web app
+        run: pnpm --filter web-cblite-example exec tsc --noEmit
+
+      - name: Build web app
+        run: pnpm --filter web-cblite-example run build
+
+      - name: Typecheck workers
+        # Run tsc --noEmit for every worker that has a tsconfig
+        run: |
+          for dir in email-worker github-worker gitlab-worker jira-worker \
+                     outlook-worker imap-worker slack-worker telegram-worker \
+                     whatsapp-worker signal-worker calendly-worker; do
+            echo "=== $dir ==="
+            pnpm --filter "$dir" exec tsc --noEmit
+          done
+
+      - name: Build workers
+        run: |
+          for dir in email-worker github-worker gitlab-worker jira-worker \
+                     outlook-worker imap-worker slack-worker telegram-worker \
+                     whatsapp-worker signal-worker calendly-worker; do
+            echo "=== $dir ==="
+            pnpm --filter "$dir" run build
+          done
+
+  # ── Rust: check + clippy ───────────────────────────────────────────────────
+  rust-check:
+    name: Rust check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cblite-auth-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cblite-auth-server
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # ── Docker Compose: validate config ───────────────────────────────────────
+  compose-validate:
+    name: docker-compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: |
+          cp .env.example .env
+          docker compose config --quiet

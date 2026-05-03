@@ -53,8 +53,6 @@ export interface AuthSession {
   token: string;
   server_url: string;
   username: string;
-  /** Plaintext password kept for platforms that use basic auth (web). */
-  password?: string;
   /** SG session cookie for the private database (preferred over basic auth) */
   gateway_session_id?: string;
   gateway_cookie_name?: string;
@@ -125,6 +123,71 @@ export interface ChunkDoc {
    * Set on locally-embedded chunks that should never leave the device.
    */
   local_only?: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Knowledge Base ────────────────────────────────────────────────────────────
+
+export interface KbContact {
+  name: string;
+  relationship?: string;
+  notes?: string;
+}
+
+export interface KbProject {
+  name: string;
+  description?: string;
+  keywords?: string[];
+}
+
+/**
+ * Per-user knowledge base document (type: "user_kb").
+ * Field names are camelCase to match the Rust serde(rename_all = "camelCase") serialisation.
+ */
+export interface UserKnowledgeBase {
+  type: "user_kb";
+  owner: string;
+  displayName?: string;
+  role?: string;
+  timezone?: string;
+  language?: string;
+  projects?: KbProject[];
+  contacts?: KbContact[];
+  ignorePatterns?: string[];
+  priorityPatterns?: string[];
+  customInstructions?: string;
+  facts?: KbFact[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type KbFactKind =
+  | "contact"
+  | "project"
+  | "ignore_pattern"
+  | "priority_pattern"
+  | "custom_instruction";
+
+export interface KbFact {
+  id: string;
+  kind: KbFactKind;
+  /** KbContact for "contact", KbProject for "project", plain string for all other kinds. */
+  value: KbContact | KbProject | string;
+  confidence: number;
+  rationale: string;
+  /** "pending" | "approved" | "rejected" */
+  status: string;
+}
+
+export interface KbFactProposal {
+  id: string;
+  type: "kb_fact_proposal";
+  owner: string;
+  source_event_id: string;
+  source_event_title: string;
+  source_worker: string;
+  facts: KbFact[];
   created_at: string;
   updated_at: string;
 }

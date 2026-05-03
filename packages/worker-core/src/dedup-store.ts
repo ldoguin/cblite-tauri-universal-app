@@ -20,6 +20,8 @@ export class DedupStore {
   private db: AnyRecord | null = null;
   private readonly dbPath: string;
   private readonly dbName: string;
+  /** In-flight set: events claimed by this process but not yet persisted. */
+  private readonly inFlight = new Set<string>();
 
   constructor(dbPath: string, dbName = "worker-state") {
     this.dbPath = dbPath;
@@ -43,11 +45,40 @@ export class DedupStore {
     this.db = null;
   }
 
-  async isProcessed(eventId: string): Promise<boolean> {
-    const coll = this.collection();
-    const { DocID } = await cbl();
-    const doc = await coll.getDocument(DocID(this.docId(eventId)));
-    return doc !== null && doc !== undefined;
+  /**
+   * Atomically claim an event for processing.
+   *
+   * Returns true if the caller should process this event; false if it is
+   * already in-flight (claimed by a concurrent call in this process) or
+   * already persisted in the DB.
+   *
+   * The in-flight check is synchronous within the Node.js event loop, so
+   * two concurrent async callers cannot both receive true for the same id.
+   */
+  async claimEvent(eventId: string): Promise<boolean> {
+    // Synchronous in-flight guard — safe within a single Node.js event loop tick.
+    if (this.inFlight.has(eventId)) return false;
+    this.inFlight.add(eventId);
+
+    // Check persistent store.
+    try {
+      const coll = this.collection();
+      const { DocID } = await cbl();
+      const doc = await coll.getDocument(DocID(this.docId(eventId)));
+      if (doc !== null && doc !== undefined) {
+        this.inFlight.delete(eventId);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      this.inFlight.delete(eventId);
+      throw err;
+    }
+  }
+
+  /** Release an in-flight claim without persisting (call on processing failure). */
+  releaseClaim(eventId: string): void {
+    this.inFlight.delete(eventId);
   }
 
   async markProcessed(eventId: string): Promise<void> {
@@ -55,12 +86,23 @@ export class DedupStore {
     const { DocID } = await cbl();
     const id = this.docId(eventId);
     const existing = await coll.getDocument(DocID(id));
-    if (existing) return;
-    const doc = coll.createDocument(DocID(id), {
-      event_id: eventId,
-      processed_at: new Date().toISOString(),
-    });
-    await coll.save(doc);
+    if (!existing) {
+      const doc = coll.createDocument(DocID(id), {
+        event_id: eventId,
+        processed_at: new Date().toISOString(),
+      });
+      await coll.save(doc);
+    }
+    this.inFlight.delete(eventId);
+  }
+
+  /** @deprecated Use claimEvent/releaseClaim/markProcessed instead. */
+  async isProcessed(eventId: string): Promise<boolean> {
+    if (this.inFlight.has(eventId)) return true;
+    const coll = this.collection();
+    const { DocID } = await cbl();
+    const doc = await coll.getDocument(DocID(this.docId(eventId)));
+    return doc !== null && doc !== undefined;
   }
 
   private collection(): AnyRecord {

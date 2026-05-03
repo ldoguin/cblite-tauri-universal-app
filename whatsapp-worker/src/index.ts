@@ -2,10 +2,12 @@ import "dotenv/config";
 import { mkdir } from "fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createHmac, timingSafeEqual } from "crypto";
-import { SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig, extractActions } from "@cblite-uni-app/worker-core";
-import type { BaseWorkerConfig, SourceEvent } from "@cblite-uni-app/worker-core";
+import {
+  Poller, SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig,
+} from "@cblite-uni-app/worker-core";
+import type { SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
 
-interface WAUser { username: string; whatsapp_phone: string }
+interface WAUser extends UserConfig { whatsapp_phone: string }
 
 function normalisePhone(phone: string): string {
   return phone.replace(/\D/g, "");
@@ -17,8 +19,7 @@ async function handleWebhook(
   appSecret: string,
   verifyToken: string,
   users: WAUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   // GET: Meta verification handshake
@@ -63,7 +64,7 @@ async function handleWebhook(
       const value = change["value"] as Record<string, unknown> | undefined;
       const messages = (value?.["messages"] as Array<Record<string, unknown>> | undefined) ?? [];
       for (const msg of messages) {
-        await processMessage(msg, users, config, writer, dedup);
+        await processMessage(msg, users, poller, dedup);
       }
     }
   }
@@ -72,8 +73,7 @@ async function handleWebhook(
 async function processMessage(
   msg: Record<string, unknown>,
   users: WAUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   const msgId = msg["id"] as string | undefined;
@@ -83,13 +83,14 @@ async function processMessage(
   const user = users.find((u) => normalisePhone(u.whatsapp_phone) === fromPhone);
   if (!user) { console.warn(`[whatsapp] No user mapped for phone ${fromPhone}`); return; }
 
-  if (await dedup.isProcessed(msgId)) return;
+  const eventId = `whatsapp::${msgId}`;
+  if (await dedup.isProcessed(eventId)) return;
 
   const textBody = (msg["text"] as Record<string, string> | undefined)?.["body"] ?? "";
   const timestamp = parseInt((msg["timestamp"] as string | undefined) ?? "0", 10);
 
   const event: SourceEvent = {
-    id: `whatsapp::${msgId}`,
+    id: eventId,
     source: "whatsapp",
     type: "dm",
     actor: fromPhone,
@@ -100,19 +101,9 @@ async function processMessage(
     raw: msg,
   };
 
-  let drafts;
-  try {
-    drafts = await extractActions(event, config.llm, config.llmMode);
-  } catch (err) {
-    console.warn(`[whatsapp] LLM failed for message ${msgId}:`, err);
-    return;
-  }
-
-  if (drafts.length > 0) {
-    const written = await writer.writeActions(drafts, event, user.username);
-    if (written < drafts.length) return;
-  }
-  await dedup.markProcessed(msgId);
+  await poller.processEvent(event, user).catch((err) =>
+    console.warn(`[whatsapp] processEvent failed for ${eventId}:`, err)
+  );
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -144,17 +135,19 @@ async function main(): Promise<void> {
   const dedup = new DedupStore(config.stateDbPath, "whatsapp-worker-state");
   await dedup.open();
   const writer = new SgWriter(config.sg);
+  const poller = new Poller(config, users, { listEvents: async () => [] }, writer, dedup);
+  await poller.start();
 
   const server = createServer((req, res) => {
-    handleWebhook(req, res, appSecret, verifyToken, users, config, writer, dedup)
+    handleWebhook(req, res, appSecret, verifyToken, users, poller, dedup)
       .catch((err) => { console.error("[whatsapp] Error:", err); res.writeHead(500).end(); });
   });
   server.listen(config.webhookPort, () =>
     console.log(`[whatsapp-worker] Listening on port ${config.webhookPort}`)
   );
 
-  process.on("SIGINT", async () => { await dedup.close(); process.exit(0); });
-  process.on("SIGTERM", async () => { await dedup.close(); process.exit(0); });
+  process.on("SIGINT", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
+  process.on("SIGTERM", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
   console.log(`[whatsapp-worker] Running. Users: ${users.map((u) => u.username).join(", ")}`);
 }
 

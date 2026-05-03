@@ -2,11 +2,11 @@ import "dotenv/config";
 import { mkdir } from "fs/promises";
 import { createConnection, type Socket } from "net";
 import {
-  SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig, extractActions,
+  Poller, SgWriter, DedupStore, loadUsersRaw, validateBaseConfig, loadBaseConfig,
 } from "@cblite-uni-app/worker-core";
-import type { BaseWorkerConfig, SourceEvent } from "@cblite-uni-app/worker-core";
+import type { SourceEvent, UserConfig } from "@cblite-uni-app/worker-core";
 
-interface SignalUser { username: string; signal_number: string }
+interface SignalUser extends UserConfig { signal_number: string }
 
 // ── signal-cli JSON-RPC client ────────────────────────────────────────────────
 
@@ -88,8 +88,7 @@ function normalisePhone(phone: string): string {
 async function processEnvelope(
   envelope: SignalEnvelope,
   users: SignalUser[],
-  config: BaseWorkerConfig,
-  writer: SgWriter,
+  poller: Poller,
   dedup: DedupStore
 ): Promise<void> {
   const text = envelope.dataMessage?.message;
@@ -116,19 +115,9 @@ async function processEnvelope(
     raw: envelope as unknown as Record<string, unknown>,
   };
 
-  let drafts;
-  try {
-    drafts = await extractActions(event, config.llm, config.llmMode);
-  } catch (err) {
-    console.warn(`[signal] LLM failed for event ${eventId}:`, err);
-    return;
-  }
-
-  if (drafts.length > 0) {
-    const written = await writer.writeActions(drafts, event, user.username);
-    if (written < drafts.length) return;
-  }
-  await dedup.markProcessed(eventId);
+  await poller.processEvent(event, user).catch((err) =>
+    console.warn(`[signal] processEvent failed for ${eventId}:`, err)
+  );
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -150,21 +139,22 @@ async function main(): Promise<void> {
   const dedup = new DedupStore(config.stateDbPath, "signal-worker-state");
   await dedup.open();
   const writer = new SgWriter(config.sg);
+  const poller = new Poller(config, users, { listEvents: async () => [] }, writer, dedup);
+  await poller.start();
 
   const client = new SignalCliClient(socketPath);
 
   client.onMessage((envelope) => {
-    processEnvelope(envelope, users, config, writer, dedup).catch((err) =>
+    processEnvelope(envelope, users, poller, dedup).catch((err) =>
       console.error("[signal] processEnvelope error:", err)
     );
   });
 
-  // Subscribe to incoming messages for the registered account
   await client.subscribe(account);
   console.log(`[signal-worker] Subscribed to ${account}. Users: ${users.map((u) => u.username).join(", ")}`);
 
-  process.on("SIGINT", async () => { await dedup.close(); process.exit(0); });
-  process.on("SIGTERM", async () => { await dedup.close(); process.exit(0); });
+  process.on("SIGINT", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
+  process.on("SIGTERM", async () => { await poller.stop(); await dedup.close(); process.exit(0); });
 
   // Keep process alive — the socket event loop drives everything
   await new Promise<never>(() => { /* intentionally never resolves */ });

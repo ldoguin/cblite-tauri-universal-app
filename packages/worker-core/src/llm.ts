@@ -103,6 +103,7 @@ export async function extractActions(
           { role: "user", content: userMessage },
         ],
         temperature: 0.2,
+        max_tokens: 2048,
         response_format: { type: "json_object" },
       },
       {
@@ -158,9 +159,19 @@ function parseLLMResponse(raw: string, eventId: string): ActionItemDraft[] {
   }
 
   // Unwrap object wrapper e.g. {"actions": [...]}
+  // Prefer well-known key names over iteration order so {"errors":[],"actions":[...]}
+  // doesn't silently return the empty errors array.
   if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const firstArray = Object.values(parsed as Record<string, unknown>).find(Array.isArray);
-    if (firstArray) parsed = firstArray;
+    const obj = parsed as Record<string, unknown>;
+    const KNOWN_KEYS = ["actions", "items", "tasks", "results", "data"];
+    const byKnownKey = KNOWN_KEYS.map((k) => obj[k]).find((v) => Array.isArray(v) && (v as unknown[]).length > 0);
+    if (byKnownKey) {
+      parsed = byKnownKey;
+    } else {
+      // Fall back to first non-empty array value.
+      const fallback = Object.values(obj).find((v) => Array.isArray(v) && (v as unknown[]).length > 0);
+      if (fallback) parsed = fallback;
+    }
   }
 
   const result = LLMResponseSchema.safeParse(parsed);

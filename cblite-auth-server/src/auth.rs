@@ -7,6 +7,9 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 
 use crate::models::Claims;
 
+pub const JWT_ISSUER: &str = "cblite-auth-server";
+pub const JWT_AUDIENCE: &str = "cblite-app";
+
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
@@ -32,6 +35,8 @@ pub fn create_jwt(user_id: &str, username: &str, secret: &str) -> anyhow::Result
         sub: user_id.to_owned(),
         username: username.to_owned(),
         exp,
+        iss: JWT_ISSUER.to_owned(),
+        aud: JWT_AUDIENCE.to_owned(),
     };
     encode(
         &Header::default(),
@@ -42,10 +47,16 @@ pub fn create_jwt(user_id: &str, username: &str, secret: &str) -> anyhow::Result
 }
 
 pub fn validate_jwt(token: &str, secret: &str) -> anyhow::Result<Claims> {
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.validate_exp = true;
+    // Zero leeway: expired tokens are rejected immediately.
+    validation.leeway = 0;
+    validation.set_issuer(&[JWT_ISSUER]);
+    validation.set_audience(&[JWT_AUDIENCE]);
     let data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )
     .map_err(|e| anyhow!("jwt decode: {e}"))?;
     Ok(data.claims)

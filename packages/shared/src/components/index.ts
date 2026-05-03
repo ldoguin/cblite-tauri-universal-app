@@ -9,3 +9,6 @@ export { CblActionCard } from "./action-card.js";
 export type { ActionApproveDetail, ActionRejectDetail, ActionEditDetail } from "./action-card.js";
 export { CblActionDrawer } from "./action-drawer.js";
 export type { ActionSaveDetail, ActionCloseDetail } from "./action-drawer.js";
+export { CblKbPanel } from "./kb-panel.js";
+export type { KbApplyDetail } from "./kb-panel.js";
+export { CblKbBrowser } from "./kb-browser.js";

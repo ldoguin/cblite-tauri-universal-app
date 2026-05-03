@@ -88,6 +88,53 @@ export async function fetchSyncConfig(
   return res.json();
 }
 
+/** Exchange a still-valid JWT for a fresh one with a new expiry + new SG session. */
+export async function refreshToken(
+  baseUrl: string,
+  token: string
+): Promise<{ token: string; sync_config: unknown; sync_configs: unknown }> {
+  const res = await fetch(`${baseUrl}/auth/refresh`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Token refresh failed (${res.status}): ${await res.text()}`);
+  return res.json();
+}
+
+/** Apply approved/rejected KB fact proposals via the auth server. */
+export async function applyKbFacts(
+  baseUrl: string,
+  token: string,
+  proposalId: string,
+  approvedFactIds: string[],
+  rejectedFactIds: string[]
+): Promise<unknown> {
+  const res = await fetch(`${baseUrl}/kb/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      proposal_id: proposalId,
+      approved_fact_ids: approvedFactIds,
+      rejected_fact_ids: rejectedFactIds,
+    }),
+  });
+  if (!res.ok) throw new Error(`KB apply failed (${res.status}): ${await res.text()}`);
+  return res.json();
+}
+
+/** Fetch the current approved user_kb from the auth server. */
+export async function fetchUserKb(
+  baseUrl: string,
+  token: string
+): Promise<import("./types.js").UserKnowledgeBase | null> {
+  const res = await fetch(`${baseUrl}/kb`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`KB fetch failed (${res.status}): ${await res.text()}`);
+  return res.json();
+}
+
 /** Search registered users by prefix/substring. Returns up to 20 matching usernames. */
 export async function searchUsers(
   baseUrl: string,

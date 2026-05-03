@@ -58,6 +58,13 @@
               <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
             </svg>
           </button>
+          <button class="rail-btn" id="nav-kb" data-panel="kb" title="Knowledge Base">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+              <path d="M2 17l10 5 10-5"/>
+              <path d="M2 12l10 5 10-5"/>
+            </svg>
+          </button>
           <button class="rail-btn" id="nav-profile" data-panel="profile" title="Profile">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
@@ -123,6 +130,13 @@
       <aside class="panel" id="panel-actions" hidden>
         <header class="panel-header">
           <span class="panel-title">Actions</span>
+        </header>
+      </aside>
+
+      <!-- ── KB Panel ──────────────────────────────────────────── -->
+      <aside class="panel" id="panel-kb" hidden>
+        <header class="panel-header">
+          <span class="panel-title">Knowledge Base</span>
         </header>
       </aside>
 
@@ -390,6 +404,14 @@
         <div id="actions-list">
           <p id="actions-empty">No actions for today.</p>
         </div>
+      </div>
+
+      <!-- ── KB View ───────────────────────────────────────────── -->
+      <div id="kb-view" class="chat-view" hidden>
+        <div class="actions-toolbar">
+          <h2>Knowledge Base Proposals</h2>
+        </div>
+        <cbl-kb-panel id="kb-panel"></cbl-kb-panel>
       </div>
 
       <!-- ── Action Drawer ─────────────────────────────────────── -->

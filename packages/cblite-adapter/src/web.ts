@@ -18,6 +18,9 @@ async function cbl(): Promise<AnyRecord> {
 let db: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let replicator: any = null;
+// Secondary replicator for the public DB (pull-only)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let replicatorPublic: any = null;
 // Change listener cleanup tokens: [{ coll, token }]
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const activeListenerTokens: Array<{ coll: any; token: any }> = [];
@@ -27,7 +30,7 @@ let _replicationStatusHandler: ((activity: string, error?: string) => void) | nu
 // Collections created / accessed by this adapter.
 // "metadata" is used in place of "_default" because @couchbase/lite-js does
 // not expose the built-in _default collection via getCollection('_default').
-const NAMED_COLLECTIONS = ["notes", "conversations", "tasks", "blobs", "metadata"] as const;
+const NAMED_COLLECTIONS = ["notes", "conversations", "tasks", "actions", "chunks", "user_data", "blobs", "metadata"] as const;
 
 /** Map the Tauri convention of using "_default" for app metadata to "metadata". */
 function resolveCollectionName(name: string): string {
@@ -160,11 +163,6 @@ export async function startReplication(
   auth?: { username: string; password: string } | { sessionId: string; cookieName?: string },
   _fieldEncryption?: { password: string; salt: string }
 ): Promise<void> {
-  if (replicator) {
-    try { replicator.stop(); } catch { /* ignore */ }
-    replicator = null;
-  }
-
   const { Replicator } = await cbl();
 
   // Strip optional scope prefix so we get the bare collection name
@@ -177,11 +175,20 @@ export async function startReplication(
     return d;
   }
 
-  const collectionsConfig: AnyRecord = {
-    [collName]: directionConfig(),
-    conversations: directionConfig(),
-    tasks: directionConfig(),
-  };
+  // Private DB replicator: replicate all user collections.
+  // Public DB replicator (pull-only): replicate only the named collection.
+  const isPublicPull = direction === "pull" && replicator !== null;
+
+  const collectionsConfig: AnyRecord = isPublicPull
+    ? { [collName]: directionConfig() }
+    : {
+        [collName]: directionConfig(),
+        conversations: directionConfig(),
+        tasks: directionConfig(),
+        actions: directionConfig(),
+        chunks: directionConfig(),
+        user_data: directionConfig(),
+      };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const config: AnyRecord = {
@@ -198,9 +205,9 @@ export async function startReplication(
   // Note: session-cookie auth (gateway_session_id) is not yet exposed in the
   // CBLite JS public API surface — basic-auth credentials are used instead.
 
-  replicator = new Replicator(config);
+  const newReplicator = new Replicator(config);
 
-  replicator.onStatusChange = (status: AnyRecord) => {
+  newReplicator.onStatusChange = (status: AnyRecord) => {
     if (_replicationStatusHandler) {
       const error: string | undefined = status.error ? String(status.error) : undefined;
       _replicationStatusHandler(mapActivity(status.status ?? status), error);
@@ -209,18 +216,41 @@ export async function startReplication(
 
   // run() returns a Promise that resolves only when replication ends (or on error).
   // Fire-and-forget — let it run in the background; stop() cancels it.
-  replicator.run().catch((err: unknown) => {
+  newReplicator.run().catch((err: unknown) => {
     console.error("[replicator] run error:", err);
     if (_replicationStatusHandler) _replicationStatusHandler("stopped", String(err));
   });
+
+  if (isPublicPull) {
+    if (replicatorPublic) { try { replicatorPublic.stop(); } catch { /* ignore */ } }
+    replicatorPublic = newReplicator;
+  } else {
+    if (replicator) { try { replicator.stop(); } catch { /* ignore */ } }
+    replicator = newReplicator;
+  }
 }
 
 // ── stopReplication ───────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function createVectorIndex(
+  _collection: string,
+  _indexName: string,
+  _expression: string,
+  _dimensions: number,
+  _centroids?: number
+): Promise<void> {
+  // Vector indexes are not supported in the web adapter — local RAG is unavailable on web.
+}
 
 export async function stopReplication(): Promise<void> {
   if (replicator) {
     try { replicator.stop(); } catch { /* ignore */ }
     replicator = null;
+  }
+  if (replicatorPublic) {
+    try { replicatorPublic.stop(); } catch { /* ignore */ }
+    replicatorPublic = null;
   }
 }
 

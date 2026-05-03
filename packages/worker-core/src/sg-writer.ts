@@ -62,14 +62,49 @@ export class SgWriter {
     }));
   }
 
-  /** Write pre-built ActionItemDocs to SG. Returns count written. */
+  /** Write pre-built ActionItemDocs to SG atomically via _bulk_docs. Returns count written. */
   async writeActionDocs(docs: ActionItemDoc[], username: string): Promise<number> {
     if (docs.length === 0) return 0;
     const token = await this.getSessionToken(username);
+    return this._bulkDocs(docs, username, token);
+  }
+
+  private async _bulkDocs(docs: ActionItemDoc[], username: string, token: string): Promise<number> {
+    // Collection-scoped bulk_docs: /{db}/{scope}.{collection}/_bulk_docs
+    const url = `/${this.config.db}/_default.actions/_bulk_docs`;
+    const body = { docs };
+    let res;
+    try {
+      res = await this.client.post(url, body, {
+        headers: { "Content-Type": "application/json", Cookie: `SyncGatewaySession=${token}` },
+      });
+    } catch (err: unknown) {
+      if (axios.isAxiosError(err) && err.response?.status === 401) {
+        this.sessions.delete(username);
+        const fresh = await this.getSessionToken(username);
+        try {
+          res = await this.client.post(url, body, {
+            headers: { "Content-Type": "application/json", Cookie: `SyncGatewaySession=${fresh}` },
+          });
+        } catch (retryErr) {
+          console.error("[sg-writer] _bulk_docs failed after re-auth:", retryErr);
+          return 0;
+        }
+      } else {
+        console.error("[sg-writer] _bulk_docs failed:", err);
+        return 0;
+      }
+    }
+    // _bulk_docs returns an array of per-doc results; count successes.
+    const results: Array<{ id: string; rev?: string; error?: string; reason?: string }> =
+      Array.isArray(res.data) ? res.data : [];
     let written = 0;
-    for (const doc of docs) {
-      const ok = await this.putDocument(doc, token, username);
-      if (ok) written++;
+    for (const r of results) {
+      if (r.error) {
+        console.error(`[sg-writer] doc '${r.id}' rejected: ${r.error} — ${r.reason ?? ""}`);
+      } else {
+        written++;
+      }
     }
     return written;
   }
@@ -85,33 +120,6 @@ export class SgWriter {
   ): Promise<number> {
     const docs = this.buildActionDocs(drafts, event, username);
     return this.writeActionDocs(docs, username);
-  }
-
-  private async putDocument(doc: ActionItemDoc, token: string, username: string): Promise<boolean> {
-    const url = `/${this.config.db}/_default.actions/${doc.id}`;
-    try {
-      await this.client.put(url, doc, {
-        headers: { "Content-Type": "application/json", Cookie: `SyncGatewaySession=${token}` },
-      });
-      console.log(`[sg] Wrote '${doc.action_type}' action for '${username}'.`);
-      return true;
-    } catch (err: unknown) {
-      if (axios.isAxiosError(err) && err.response?.status === 401) {
-        this.sessions.delete(username);
-        try {
-          const fresh = await this.getSessionToken(username);
-          await this.client.put(url, doc, {
-            headers: { "Content-Type": "application/json", Cookie: `SyncGatewaySession=${fresh}` },
-          });
-          return true;
-        } catch (retryErr) {
-          console.error(`[sg] Write failed after re-auth for '${username}':`, retryErr);
-          return false;
-        }
-      }
-      console.error(`[sg] Write failed for '${username}':`, err);
-      return false;
-    }
   }
 
   private async getSessionToken(username: string): Promise<string> {
